@@ -10,6 +10,13 @@ Es werden keine trainierten Modelle oder Trainingsdaten benötigt.
 Auf diesem PC ist eine eigene Python-Umgebung im Repository eingerichtet.
 `Start.cmd` öffnet die GUI; `Start.cmd -Demo` startet die synthetische Demo.
 
+Der Button **English / Deutsch** oben rechts schaltet die Sprache direkt im
+laufenden Fenster um. Auswahl, Messreferenz und Aufnahme bleiben erhalten.
+Die Sprache wird für den nächsten Start gespeichert, auch im Demo-Modus.
+Mit `bibazu-vision --language en` bzw. `--language de` kann sie beim Start
+vorgegeben werden. Beschriftungen, Statusmeldungen, Log und Dialoge sind übersetzt;
+Messdateien und Kamera-Parameter verwenden weiterhin ihre ursprünglichen Werte.
+
 Für einen neuen Rechner Python 3.11+ und den **Baumer USB GenTL-Producer**
 (64 Bit passend zu Python, beispielsweise mit Baumer Camera Explorer) installieren:
 

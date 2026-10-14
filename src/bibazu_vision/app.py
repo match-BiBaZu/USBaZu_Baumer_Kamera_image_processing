@@ -9,7 +9,16 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import QPointF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QLibraryInfo,
+    QLocale,
+    QPointF,
+    QSignalBlocker,
+    Qt,
+    QTimer,
+    QTranslator,
+    pyqtSignal,
+)
 from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -35,6 +44,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .camera import CameraConfig
+from .i18n import translate, translate_message
 from .processing import ProcessingConfig, render_overlay
 from .recording import CaptureConfig, load_clip
 from .worker import PipelineWorker
@@ -114,6 +124,7 @@ class AngleTrace(QWidget):
     def __init__(self):
         super().__init__()
         self.values = []
+        self.caption = "Winkelverlauf der Vorschau · ±90°"
         self.setMinimumHeight(80)
         self.setMaximumHeight(100)
 
@@ -127,7 +138,7 @@ class AngleTrace(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor("#111c30"))
         painter.setPen(QColor("#64748b"))
-        painter.drawText(8, 16, "Winkelverlauf der Vorschau · ±90°")
+        painter.drawText(8, 16, self.caption)
         middle = self.height() / 2 + 8
         painter.drawLine(0, int(middle), self.width(), int(middle))
         painter.setPen(QPen(QColor("#38bdf8"), 2))
@@ -155,7 +166,7 @@ def spin(value, minimum, maximum, decimals=1, suffix=""):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, data_dir=None, demo=False):
+    def __init__(self, data_dir=None, demo=False, language=None):
         super().__init__()
         self.setWindowTitle("BiBaZu · Kamera & Winkelmessung")
         self.resize(1420, 920)
@@ -167,6 +178,12 @@ class MainWindow(QMainWindow):
                 self.profile = json.loads(profile_path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 pass
+        preferred = language if language is not None else self.profile.get("language", "de")
+        self.language = preferred if preferred in {"de", "en"} else "de"
+        self._text_bindings = {}
+        self._log_sources = []
+        self._last_note = None
+        self._qt_translator = QTranslator(self)
         self.worker = None
         self.last_snapshot = None
         self.last_frame = None
@@ -178,6 +195,8 @@ class MainWindow(QMainWindow):
         self.pipeline_error = None
         self.recording_error_text = None
         self.build_ui()
+        self._register_texts()
+        self.set_language(self.language, persist=language is not None)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_live)
         self.timer.start(33)
@@ -192,6 +211,88 @@ class MainWindow(QMainWindow):
         button = QPushButton(text)
         button.clicked.connect(callback)
         return button
+
+    def t(self, source, **values):
+        return translate(source, self.language, **values)
+
+    def ui_text(self, widget, source, **values):
+        self._text_bindings[widget] = (source, values)
+        widget.setText(self.t(source, **values))
+
+    def _register_texts(self):
+        for kind in (QLabel, QPushButton, QCheckBox):
+            for widget in self.findChildren(kind):
+                if widget is not self.language_button:
+                    self._text_bindings[widget] = (widget.text(), {})
+        self._group_texts = [(widget, widget.title()) for widget in self.findChildren(QGroupBox)]
+        self._combo_texts = [
+            (widget, [widget.itemText(i) for i in range(widget.count())])
+            for widget in self.findChildren(QComboBox)
+        ]
+        self._tab_texts = [self.tabs.tabText(i) for i in range(self.tabs.count())]
+
+    def toggle_language(self):
+        self.set_language("en" if self.language == "de" else "de")
+
+    def set_language(self, language, persist=True):
+        if language not in {"de", "en"}:
+            raise ValueError("language must be 'de' or 'en'")
+        self.language = language
+        application = QApplication.instance()
+        application.removeTranslator(self._qt_translator)
+        if language == "de" and self._qt_translator.load(
+            "qtbase_de", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+        ):
+            application.installTranslator(self._qt_translator)
+        locale = QLocale("en_US" if language == "en" else "de_DE")
+        blockers = [QSignalBlocker(widget) for widget in self.findChildren(QDoubleSpinBox)]
+        self.setLocale(locale)
+        del blockers
+        self.setWindowTitle(self.t("BiBaZu · Kamera & Winkelmessung"))
+        for widget, (source, values) in self._text_bindings.items():
+            if isinstance(widget, ImageView) and widget.source is not None:
+                continue
+            widget.setText(self.t(source, **values))
+        for widget, source in self._group_texts:
+            widget.setTitle(self.t(source))
+        for widget, sources in self._combo_texts:
+            with QSignalBlocker(widget):
+                for index, source in enumerate(sources):
+                    widget.setItemText(index, self.t(source))
+        for index, source in enumerate(self._tab_texts):
+            self.tabs.setTabText(index, self.t(source))
+        self.trace.caption = self.t("Winkelverlauf der Vorschau · ±90°")
+        self.trace.update()
+        self.language_button.setText("Deutsch" if language == "en" else "English")
+        self.language_button.setToolTip(
+            "Switch to German" if language == "en" else "Auf Englisch umschalten"
+        )
+        scrollbar = self.log.verticalScrollBar()
+        previous = scrollbar.value()
+        at_bottom = previous == scrollbar.maximum()
+        self.log.setPlainText(
+            "\n".join(translate_message(source, language) for source in self._log_sources)
+        )
+        scrollbar.setValue(scrollbar.maximum() if at_bottom else previous)
+        if self._last_note:
+            self.statusBar().showMessage(translate_message(self._last_note, language), 10000)
+        if persist:
+            self.persist_language()
+
+    def persist_language(self):
+        # Write only the preference, including in demo mode. Do not replace the
+        # native camera calibration with the current synthetic scene.
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            target = self.data_dir / "settings.json"
+            profile = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
+            profile["language"] = self.language
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text(json.dumps(profile, indent=2), encoding="utf-8")
+            temporary.replace(target)
+            self.profile["language"] = self.language
+        except (OSError, ValueError) as exc:
+            self.note(f"Sprache konnte nicht gespeichert werden: {exc}")
 
     def build_ui(self):
         self.setStyleSheet("""
@@ -211,7 +312,12 @@ class MainWindow(QMainWindow):
         left = QVBoxLayout()
         title = QLabel("BiBaZu  /  Bildverarbeitung")
         title.setStyleSheet("font-size:23px;font-weight:600;color:#f8fafc;padding:6px")
-        left.addWidget(title)
+        heading = QHBoxLayout()
+        heading.addWidget(title, 1)
+        self.language_button = self.button("English", self.toggle_language)
+        self.language_button.setObjectName("language_toggle")
+        heading.addWidget(self.language_button)
+        left.addLayout(heading)
         indicators = QHBoxLayout()
         self.angle_label = QLabel("— °")
         self.angle_label.setMinimumWidth(260)
@@ -473,19 +579,29 @@ class MainWindow(QMainWindow):
         panel_layout.addStretch()
 
     def note(self, text):
-        self.log.append(text)
-        self.statusBar().showMessage(text, 10000)
+        self._log_sources.append(text)
+        self._last_note = text
+        localized = translate_message(text, self.language)
+        self.log.append(localized)
+        self.statusBar().showMessage(localized, 10000)
 
     def choose_cti(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "GenTL-Producer", self.cti.text(), "GenTL (*.cti)"
+            self,
+            self.t("GenTL-Producer"),
+            self.cti.text(),
+            "GenTL (*.cti)",
+            options=QFileDialog.Option.DontUseNativeDialog,
         )
         if path:
             self.cti.setText(path)
 
     def choose_output(self):
         path = QFileDialog.getExistingDirectory(
-            self, "Speicherordner für Durchläufe", self.output_path.text()
+            self,
+            self.t("Speicherordner für Durchläufe"),
+            self.output_path.text(),
+            options=QFileDialog.Option.DontUseNativeDialog,
         )
         if path:
             self.output_path.setText(path)
@@ -582,7 +698,9 @@ class MainWindow(QMainWindow):
         self.connect_button.setEnabled(False)
         self.output_path.setEnabled(False)
         self.output_button.setEnabled(False)
-        self.state_label.setText("Verbinde Demo …" if demo else "Verbinde Baumer-USB-Kamera …")
+        self.ui_text(
+            self.state_label, "Verbinde Demo …" if demo else "Verbinde Baumer-USB-Kamera …"
+        )
         self.worker.start()
 
     def worker_finished(self):
@@ -590,21 +708,22 @@ class MainWindow(QMainWindow):
         self.processing_group.setEnabled(True)
         self.output_path.setEnabled(True)
         self.output_button.setEnabled(True)
-        self.state_label.setText(
-            "Kamerafehler · " + self.pipeline_error
-            if self.pipeline_error
-            else (
-                "Aufzeichnung fehlgeschlagen · " + self.recording_error_text
-                if self.recording_error_text
-                else "Kamera getrennt · Aufzeichnung abgeschlossen."
+        if self.pipeline_error:
+            self.ui_text(self.state_label, "Kamerafehler · {error}", error=self.pipeline_error)
+        elif self.recording_error_text:
+            self.ui_text(
+                self.state_label,
+                "Aufzeichnung fehlgeschlagen · {error}",
+                error=self.recording_error_text,
             )
-        )
+        else:
+            self.ui_text(self.state_label, "Kamera getrennt · Aufzeichnung abgeschlossen.")
         self.refresh_recordings()
         self.save_profile()
 
     def camera_error(self, text):
         self.pipeline_error = text
-        self.state_label.setText("Kamerafehler · " + text)
+        self.ui_text(self.state_label, "Kamerafehler · {error}", error=text)
         self.note(text)
 
     def recording_error(self, text):
@@ -614,7 +733,7 @@ class MainWindow(QMainWindow):
     def disconnect_camera(self):
         if self.worker is not None:
             self.worker.stop()
-            self.state_label.setText("Kamera wird getrennt; Aufzeichnung wird gespeichert …")
+            self.ui_text(self.state_label, "Kamera wird getrennt; Aufzeichnung wird gespeichert …")
 
     def command(self, name, value=None):
         if self.worker is None or not self.worker.isRunning():
@@ -677,16 +796,19 @@ class MainWindow(QMainWindow):
         self.processing_group.setEnabled(state not in {"waiting", "moving"})
         reason = getattr(status, "reason", "") or ""
         error = getattr(status, "error", "")
-        self.state_label.setText(
-            f"Aufzeichnung: {state} · {reason} · "
-            f"{getattr(status, 'buffered_frames', 0)} Bilder · "
-            f"{getattr(status, 'buffered_bytes', 0) / 1024**2:.1f} MiB"
-            + (f" · {error}" if error else "")
-            + (
+        self.ui_text(
+            self.state_label,
+            "Aufzeichnung: {state} · {reason} · {frames} Bilder · {mib:.1f} MiB{error}{stale}",
+            state=state,
+            reason=reason,
+            frames=getattr(status, "buffered_frames", 0),
+            mib=getattr(status, "buffered_bytes", 0) / 1024**2,
+            error=f" · {error}" if error else "",
+            stale=(
                 f" · Kein neues Bild seit {snapshot['stale_seconds']:.1f}s"
                 if snapshot["stale_seconds"] > 1
                 else ""
-            )
+            ),
         )
         if snapshot["last_clip"] and snapshot["last_clip"] != self.last_saved:
             self.recording_error_text = None
@@ -698,24 +820,38 @@ class MainWindow(QMainWindow):
         self.last_frame = snapshot["frame_id"]
         detection = snapshot["detection"]
         angle = detection.angle_deg
-        self.angle_label.setText("— °" if angle is None else f"{angle:+.2f} °")
-        self.quality_label.setText(
-            "Kein Bauteil"
-            if detection.center is None
-            else f"Qualität {detection.confidence:.0%}"
-            + (" · Randkontakt" if detection.touching_border else "")
+        self.ui_text(
+            self.angle_label,
+            "— °" if angle is None else "{angle:+.2f} °",
+            **({} if angle is None else {"angle": angle}),
         )
-        self.rate_label.setText(
-            f"{snapshot['fps']:.0f} FPS · {detection.processing_ms:.1f} ms\n"
-            f"ID {snapshot['frame_id']} · ID-Lücken {snapshot['frame_gaps']}"
+        if detection.center is None:
+            self.ui_text(self.quality_label, "Kein Bauteil")
+        else:
+            self.ui_text(
+                self.quality_label,
+                "Qualität {confidence:.0%}{border}",
+                confidence=detection.confidence,
+                border=" · Randkontakt" if detection.touching_border else "",
+            )
+        self.ui_text(
+            self.rate_label,
+            "{fps:.0f} FPS · {ms:.1f} ms\nID {frame_id} · ID-Lücken {gaps}",
+            fps=snapshot["fps"],
+            ms=detection.processing_ms,
+            frame_id=snapshot["frame_id"],
+            gaps=snapshot["frame_gaps"],
         )
         config = ProcessingConfig(**snapshot["config"])
-        self.segmentation_label.setText(
+        self.ui_text(
+            self.segmentation_label,
             "Segmentierung: fester Hintergrundabzug"
             if snapshot.get("has_background")
-            else "Segmentierung: absolute Helligkeitsschwelle · kein Hintergrund"
+            else "Segmentierung: absolute Helligkeitsschwelle · kein Hintergrund",
         )
-        self.reference_label.setText(f"0°-Offset: {config.zero_offset_deg:.2f}°")
+        self.ui_text(
+            self.reference_label, "0°-Offset: {offset:.2f}°", offset=config.zero_offset_deg
+        )
         image = (
             render_overlay(snapshot["image"], detection, config)
             if self.overlay_check.isChecked()
@@ -738,7 +874,10 @@ class MainWindow(QMainWindow):
 
     def choose_clip(self):
         path = QFileDialog.getExistingDirectory(
-            self, "Gespeicherten Durchlauf auswählen", str(self.data_dir)
+            self,
+            self.t("Gespeicherten Durchlauf auswählen"),
+            str(self.data_dir),
+            options=QFileDialog.Option.DontUseNativeDialog,
         )
         if path:
             self.open_clip(Path(path))
@@ -757,7 +896,7 @@ class MainWindow(QMainWindow):
         self.review_position = 0.0
         self.show_review(0)
         self.tabs.setCurrentIndex(1)
-        self.play_button.setText("▶ Abspielen")
+        self.ui_text(self.play_button, "▶ Abspielen")
 
     def review_image(self, index):
         image = self.clip.frames[index]
@@ -795,11 +934,14 @@ class MainWindow(QMainWindow):
         self.review_view.set_image(self.review_image(index))
         measurement = self.clip.measurements[index]
         angle = measurement.get("angle_deg")
-        self.review_info.setText(
-            f"Bild {index + 1}/{len(self.clip.frames)} · "
-            f"t = {(self.clip.timestamps[index] - self.clip.timestamps[0]) * 1000:.1f} ms · "
-            f"Winkel {'—' if angle is None else f'{angle:+.2f}°'} · "
-            f"Ende: {self.clip.manifest.get('stop_reason', '?')}"
+        self.ui_text(
+            self.review_info,
+            "Bild {index}/{count} · t = {milliseconds:.1f} ms · Winkel {angle} · Ende: {reason}",
+            index=index + 1,
+            count=len(self.clip.frames),
+            milliseconds=(self.clip.timestamps[index] - self.clip.timestamps[0]) * 1000,
+            angle="—" if angle is None else f"{angle:+.2f}°",
+            reason=self.clip.manifest.get("stop_reason", "?"),
         )
 
     def toggle_play(self):
@@ -807,12 +949,12 @@ class MainWindow(QMainWindow):
             return
         if self.play_timer.isActive():
             self.play_timer.stop()
-            self.play_button.setText("▶ Abspielen")
+            self.ui_text(self.play_button, "▶ Abspielen")
         else:
             if self.slider.value() == self.slider.maximum():
                 self.slider.setValue(0)
             self.play_timer.start()
-            self.play_button.setText("Ⅱ Pause")
+            self.ui_text(self.play_button, "Ⅱ Pause")
 
     def advance_review(self):
         if self.clip is None:
@@ -823,13 +965,17 @@ class MainWindow(QMainWindow):
         self.slider.setValue(max(0, min(index, len(self.clip.frames) - 1)))
         if target >= self.clip.timestamps[-1]:
             self.play_timer.stop()
-            self.play_button.setText("▶ Abspielen")
+            self.ui_text(self.play_button, "▶ Abspielen")
 
     def export_csv(self):
         if self.clip is None:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Messwerte exportieren", "angles.csv", "CSV (*.csv)"
+            self,
+            self.t("Messwerte exportieren"),
+            "angles.csv",
+            "CSV (*.csv)",
+            options=QFileDialog.Option.DontUseNativeDialog,
         )
         if path:
             try:
@@ -842,7 +988,11 @@ class MainWindow(QMainWindow):
         if self.clip is None:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Standbild mit Merkmalen", "frame.png", "PNG (*.png)"
+            self,
+            self.t("Standbild mit Merkmalen"),
+            "frame.png",
+            "PNG (*.png)",
+            options=QFileDialog.Option.DontUseNativeDialog,
         )
         if path:
             if cv2.imwrite(path, self.review_image(self.review_index)):
@@ -857,6 +1007,7 @@ class MainWindow(QMainWindow):
             self.data_dir.mkdir(parents=True, exist_ok=True)
             profile = {
                 "cti": self.cti.text(),
+                "language": self.language,
                 "serial": self.serial.text(),
                 "exposure": self.exposure.value(),
                 "fps": self.fps.value(),
@@ -895,9 +1046,10 @@ def main():
     parser.add_argument("--demo", action="store_true", help="Synthetischen Durchlauf starten")
     parser.add_argument("--connect", action="store_true", help="Kamera beim Start verbinden")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
+    parser.add_argument("--language", choices=("de", "en"), help="Sprache: Deutsch / Englisch")
     args = parser.parse_args()
     application = QApplication(sys.argv[:1])
-    window = MainWindow(args.data_dir, demo=args.demo)
+    window = MainWindow(args.data_dir, demo=args.demo, language=args.language)
     window.show()
     if args.connect and not args.demo:
         QTimer.singleShot(0, lambda: window.connect_camera(False))
