@@ -5,6 +5,10 @@ Rechteck (OBB) und Hauptachse, Winkel gegenüber der Rutsche, verlustlose
 Durchlaufaufzeichnung, Einzelbildkontrolle, Zeitlupe und Messwerte als CSV.
 Es werden keine trainierten Modelle oder Trainingsdaten benötigt.
 
+Die GUI bietet außerdem eine lokale API für Live-Messwerte und einmalige,
+zugeordnete AutoTune-Aufnahmen. Installation, Sitzungen und Endpunkte sind in
+[Kamera-API v1](docs/api.md) beschrieben.
+
 ## Start unter Windows
 
 Auf diesem PC ist eine eigene Python-Umgebung im Repository eingerichtet.

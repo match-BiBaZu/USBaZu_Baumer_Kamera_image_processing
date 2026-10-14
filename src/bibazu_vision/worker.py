@@ -11,8 +11,10 @@ from pathlib import Path
 import cv2
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from .api_capture import ApiCapture
 from .camera import BaumerCamera, CameraConfig
 from .demo import DemoCamera
+from .local_api_runtime import ApiError
 from .processing import FrameProcessor, ProcessingConfig
 from .recording import CaptureConfig, CaptureManager
 
@@ -42,12 +44,15 @@ class PipelineWorker(QThread):
         self.lock = threading.Lock()
         self.latest = None
         self.stopping = threading.Event()
+        self.api_capture = ApiCapture(self)
 
     def command(self, name, value=None):
         try:
             self.commands.put_nowait((name, value))
+            return True
         except queue.Full:
             self.message.emit("Zu viele Einstellungen: kurz warten und erneut anwenden.")
+            return False
 
     def snapshot(self):
         with self.lock:
@@ -106,6 +111,28 @@ class PipelineWorker(QThread):
                         name, value = self.commands.get_nowait()
                     except queue.Empty:
                         break
+                    if name == "api_start":
+                        self.api_capture.start(capture, value)
+                        if self.api_capture.busy():
+                            capture.metadata = {
+                                "processing": asdict(processor.config),
+                                "camera": dict(camera.diagnostics), "demo": self.demo,
+                                **self.api_capture.metadata(),
+                            }
+                            if self.camera_config.mode == "acquisition_trigger" and not self.demo:
+                                camera.rearm_acquisition()
+                        continue
+                    if name == "api_trigger":
+                        try:
+                            self.api_capture.trigger(capture)
+                        except ApiError as exc:
+                            self.message.emit(str(exc))
+                        continue
+                    if self.api_capture.busy():
+                        if name == "disarm":
+                            self.api_capture.cancel("manual_stop")
+                        self.message.emit("AutoTune-Versuch aktiv; Einstellungen sind gesperrt.")
+                        continue
                     if name in {
                         "config",
                         "background",
@@ -177,6 +204,7 @@ class PipelineWorker(QThread):
                     elif name == "capture_config":
                         try:
                             capture.configure(CaptureConfig(**value))
+                            self.capture_config = capture.config
                         except (ValueError, RuntimeError) as exc:
                             self.message.emit(f"Aufzeichnungseinstellungen: {exc}")
                 current = camera.read(timeout=0.2)
@@ -184,6 +212,7 @@ class PipelineWorker(QThread):
                     previous_state = capture.status.state
                     status = capture.poll(time.perf_counter())
                     report_recording_error(status)
+                    self.api_capture.tick(capture)
                     if (
                         self.camera_config.mode == "acquisition_trigger"
                         and not self.demo
@@ -209,6 +238,7 @@ class PipelineWorker(QThread):
                     "processing": asdict(processor.config),
                     "camera": dict(camera.diagnostics),
                     "demo": self.demo,
+                    **self.api_capture.metadata(),
                 }
                 previous_state = capture.status.state
                 status = capture.ingest(
@@ -219,6 +249,7 @@ class PipelineWorker(QThread):
                     triggered=frame.triggered,
                 )
                 report_recording_error(status)
+                self.api_capture.tick(capture, frame, detection)
                 if (
                     self.camera_config.mode == "acquisition_trigger"
                     and not self.demo
@@ -258,10 +289,15 @@ class PipelineWorker(QThread):
                     self.message.emit(f"Kamera schließen: {exc}")
             if capture is not None:
                 try:
+                    if self.api_capture.busy():
+                        self.api_capture.cancel("camera_disconnected")
+                        capture.abort("camera_disconnected")
                     # Keep the worker alive until its writer has finished; the UI
                     # close handler can then safely wait or let the user retry.
                     capture.close(timeout=None)
+                    self.api_capture.tick(capture)
                     if capture.status.error:
                         self.recording_failed.emit(capture.status.error)
                 except Exception as exc:
                     self.message.emit(f"Aufzeichnung abschließen: {exc}")
+            self.api_capture.shutdown("camera_disconnected")

@@ -513,6 +513,7 @@ class MainWindow(QMainWindow):
         panel_layout.addWidget(group)
 
         group = QGroupBox("3 · Durchlauf aufzeichnen")
+        self.capture_group = group
         form = QFormLayout(group)
         self.start_mode = QComboBox()
         for text, mode in [
@@ -793,7 +794,10 @@ class MainWindow(QMainWindow):
         self.last_snapshot = snapshot
         status = snapshot["status"]
         state = getattr(status, "state", "?")
-        self.processing_group.setEnabled(state not in {"waiting", "moving"})
+        self.processing_group.setEnabled(
+            state not in {"waiting", "moving"} and not self.worker.api_capture.busy()
+        )
+        self.capture_group.setEnabled(not self.worker.api_capture.busy())
         reason = getattr(status, "reason", "") or ""
         error = getattr(status, "error", "")
         self.ui_text(
@@ -1031,6 +1035,9 @@ class MainWindow(QMainWindow):
             self.note(f"Einstellungen konnten nicht gespeichert werden: {exc}")
 
     def closeEvent(self, event):
+        if hasattr(self, "control_api"):
+            self.control_api.lease.invalidate()
+            self.control_api.expire()
         if self.worker is not None and self.worker.isRunning():
             self.worker.stop()
             if not self.worker.wait(3000):
@@ -1038,6 +1045,8 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
         self.save_profile()
+        if hasattr(self, "control_api"):
+            self.control_api.stop()
         event.accept()
 
 
