@@ -205,6 +205,7 @@ class CaptureManager:
         self._closing = threading.Event()
         self._closed = False
         self._armed = False
+        self._single_shot = False
         self._active: _Capture | None = None
         self._pre_roll: deque[_Frame] = deque()
         self._bytes = 0
@@ -247,10 +248,11 @@ class CaptureManager:
             self._rejected_triggers,
         )
 
-    def arm(self, now: float | None = None) -> CaptureStatus:
+    def arm(self, now: float | None = None, *, single_shot: bool = False) -> CaptureStatus:
         with self._lock:
             self._ensure_open()
             self._armed = True
+            self._single_shot = single_shot
             self._reason = None
             self._error = None
             return self._status()
@@ -284,6 +286,15 @@ class CaptureManager:
             stamp = self._clock(now)
             self._trim_pre_roll(stamp)
             self._begin(stamp, "manual" if self.config.start_mode == "manual" else "hardware")
+            return self._status()
+
+    def abort(self, reason="external_abort") -> CaptureStatus:
+        """Stop an externally owned capture and preserve its aborted manifest."""
+        with self._lock:
+            self._armed = False
+            if self._active is not None:
+                self._finish(reason, self._last_timestamp or self._active.start, aborted=True)
+            self._clear_pre_roll()
             return self._status()
 
     def ingest(
@@ -471,6 +482,8 @@ class CaptureManager:
         capture.aborted = aborted
         self._active = None
         self._reason = reason
+        if self._single_shot:
+            self._armed = False
         self._pending += 1
         # _begin reserves a queue slot, including the currently executing writer.
         self._jobs.put_nowait(capture)
