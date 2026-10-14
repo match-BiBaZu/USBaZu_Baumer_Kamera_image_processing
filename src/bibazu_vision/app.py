@@ -1059,9 +1059,6 @@ def main():
     args = parser.parse_args()
     application = QApplication(sys.argv[:1])
     window = MainWindow(args.data_dir, demo=args.demo, language=args.language)
-    from .api import VisionApi
-    window.control_api = VisionApi(window)
-    window.control_api.start()
     window.show()
     if args.connect and not args.demo:
         QTimer.singleShot(0, lambda: window.connect_camera(False))
