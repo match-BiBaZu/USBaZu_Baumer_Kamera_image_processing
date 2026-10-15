@@ -65,6 +65,10 @@ Der Winkel beschreibt weiterhin eine 2D-Achse modulo 180°.
 
 ## Fehler und Laufzeit
 
+Während **Kameraeinstellungen anwenden** läuft, wird `POST /trials` mit HTTP 409
+abgelehnt. Nach Abschluss kann derselbe Versuch erneut angefragt werden; die
+abgelehnte Anfrage reserviert keine Versuchskennung.
+
 409: Sitzung oder Ressource belegt/veraltet; 422: ungültige Anfrage; 503: Kamera
 nicht verfügbar; 504: Qt-Antwort ausgeblieben; 404: Versuch unbekannt.
 Ein Verbindungsverlust oder Sitzungsablauf beendet den laufenden Versuch. Es gibt

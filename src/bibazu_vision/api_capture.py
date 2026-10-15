@@ -35,6 +35,10 @@ class ApiCapture:
     def create(self, request, lease, token):
         with self.lock:
             lease.require(token)
+            if getattr(self.worker, "camera_settings_updating", False):
+                raise ApiError(
+                    409, "Kameraeinstellungen werden angewendet; Versuch später starten."
+                )
             trial_id = request["trial_id"]
             if trial_id in self.trials:
                 raise ApiError(409, "Versuchskennung wurde bereits verwendet.")

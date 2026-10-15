@@ -6,7 +6,12 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from bibazu_vision.camera import BaumerCamera, CameraConfig, convert_component
+from bibazu_vision.camera import (
+    BaumerCamera,
+    CameraConfig,
+    CameraSettingsError,
+    convert_component,
+)
 
 
 def test_mono_frame_owns_pixels_after_gen_tl_buffer_reuse():
@@ -317,4 +322,113 @@ def test_automatic_exposure_probe_preserves_gain_and_color_auto_controls():
         for name in ("ExposureAuto", "GainAuto", "BalanceWhiteAuto"):
             assert getattr(acquirer.node_map, name).value == "Continuous"
         assert acquirer.node_map.ColorTransformationAuto.value == "Once"
+        camera.close()
+
+
+def settings_acquirer(exposure_name="ExposureTime"):
+    acquirer = autogain_acquirer()
+    if exposure_name == "ExposureTimeAbs":
+        acquirer.node_map.ExposureTimeAbs = acquirer.node_map.ExposureTime
+        del acquirer.node_map.ExposureTime
+    acquirer.node_map.AcquisitionFrameRate = Node(50.0)
+    acquirer.node_map.AcquisitionFrameRateEnable = Node(False)
+    return acquirer
+
+
+@pytest.mark.parametrize("exposure_name", ["ExposureTime", "ExposureTimeAbs"])
+@pytest.mark.parametrize("mode", ["live", "frame_trigger", "acquisition_trigger"])
+def test_live_settings_reuse_device_refresh_diagnostics_and_restore_originals(exposure_name, mode):
+    acquirer = settings_acquirer(exposure_name)
+    nm = acquirer.node_map
+    nm.TriggerSelector.choices.append("AcquisitionStart")
+    original = {name: node.value for name, node in vars(nm).items()}
+    p1, p2, p3 = patches(acquirer)
+    camera = BaumerCamera(CameraConfig(cti_path="test.cti", mode=mode, exposure_us=1000, fps=100))
+    with p1, p2, p3:
+        camera.open()
+        trigger = (nm.TriggerSelector.value, nm.TriggerMode.value, nm.TriggerActivation.value)
+        with patch.object(acquirer, "start", wraps=acquirer.start) as start:
+            for exposure, fps in [(5000, 80), (10000, 60)]:
+                result = camera.apply_settings(exposure, fps)
+                assert result == {"exposure_us": exposure, "fps": fps}
+                assert camera.config.exposure_us == exposure
+                assert camera.config.fps == fps
+                assert camera.diagnostics["actual"][exposure_name] == exposure
+                assert camera.diagnostics["actual"]["AcquisitionFrameRate"] == fps
+                assert camera._acquirer is acquirer and acquirer.started
+                assert not acquirer.destroyed
+                assert (nm.TriggerSelector.value, nm.TriggerMode.value,
+                        nm.TriggerActivation.value) == trigger
+                assert camera._first_acquisition_frame
+            assert start.call_count == 2
+        camera.close()
+    assert {name: node.value for name, node in vars(nm).items()} == original
+
+
+class RejectingNode(Node):
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, value):
+        if value == 999:
+            raise ValueError("outside camera range")
+        self._value = value
+
+
+def test_live_settings_roll_back_partial_update_and_auto_controls_without_disconnect():
+    acquirer = settings_acquirer()
+    nm = acquirer.node_map
+    nm.AcquisitionFrameRate = RejectingNode(50)
+    p1, p2, p3 = patches(acquirer)
+    camera = BaumerCamera(CameraConfig(cti_path="test.cti"))
+    with p1, p2, p3:
+        camera.open()
+        previous = dict(camera.diagnostics["actual"])
+        with pytest.raises(CameraSettingsError, match="outside camera range"):
+            camera.apply_settings(7000, 999)
+        assert acquirer.started and not acquirer.destroyed and camera.is_open
+        assert camera.diagnostics["actual"] == previous
+        assert camera.config.exposure_us is None and camera.config.fps is None
+        # A later valid update still succeeds on this connection.
+        camera.apply_settings(5000, 80)
+        camera.close()
+    assert nm.ExposureTime.value == 20331
+    assert nm.AcquisitionFrameRate.value == 50
+    assert nm.ExposureAuto.value == "Continuous"
+
+
+@pytest.mark.parametrize("recoverable", [True, False])
+def test_settings_restart_failure_recovers_or_requires_camera_shutdown(recoverable):
+    acquirer = settings_acquirer()
+    p1, p2, p3 = patches(acquirer)
+    camera = BaumerCamera(CameraConfig(cti_path="test.cti"))
+    with p1, p2, p3:
+        camera.open()
+        previous = dict(camera.diagnostics["actual"])
+        failures = [OSError("restart failed"), None if recoverable else OSError("USB lost")]
+        with patch.object(acquirer, "start", side_effect=failures):
+            with pytest.raises(RuntimeError) as error:
+                camera.apply_settings(5000, 80)
+        assert isinstance(error.value, CameraSettingsError) is recoverable
+        if recoverable:
+            assert camera.diagnostics["actual"] == previous
+        else:
+            assert "Wiederherstellung fehlgeschlagen" in str(error.value)
+        camera.close()
+    assert acquirer.destroyed
+
+
+@pytest.mark.parametrize("exposure,fps", [(float("nan"), 50), (5000, 0)])
+def test_invalid_settings_do_not_pause_acquisition(exposure, fps):
+    acquirer = settings_acquirer()
+    p1, p2, p3 = patches(acquirer)
+    camera = BaumerCamera(CameraConfig(cti_path="test.cti"))
+    with p1, p2, p3:
+        camera.open()
+        with patch.object(acquirer, "stop") as stop:
+            with pytest.raises(CameraSettingsError):
+                camera.apply_settings(exposure, fps)
+            stop.assert_not_called()
         camera.close()

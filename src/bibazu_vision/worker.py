@@ -12,7 +12,7 @@ import cv2
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from .api_capture import ApiCapture
-from .camera import BaumerCamera, CameraConfig
+from .camera import BaumerCamera, CameraConfig, CameraSettingsError
 from .demo import DemoCamera
 from .local_api_runtime import ApiError
 from .processing import FrameProcessor, ProcessingConfig
@@ -23,6 +23,7 @@ class PipelineWorker(QThread):
     message = pyqtSignal(str)
     failed = pyqtSignal(str)
     recording_failed = pyqtSignal(str)
+    camera_settings_finished = pyqtSignal(bool, dict, str)
 
     def __init__(
         self,
@@ -44,7 +45,48 @@ class PipelineWorker(QThread):
         self.lock = threading.Lock()
         self.latest = None
         self.stopping = threading.Event()
+        self.camera_idle = threading.Event()
+        self.camera_settings_updating = False
         self.api_capture = ApiCapture(self)
+
+    def camera_settings_available(self):
+        # Separate from the frame mailbox: hardware-triggered cameras may not
+        # deliver their first frame until long after connecting.
+        return (
+            self.camera_idle.is_set() and not self.demo
+            and not self.stopping.is_set() and not self.api_capture.busy()
+        )
+
+    def apply_camera_settings(self, camera, capture, value):
+        # Reserve against API trials without holding their telemetry lock across
+        # slow GenTL operations (the GUI also reads that lock).
+        with self.api_capture.lock:
+            if (
+                self.demo or self.stopping.is_set() or self.api_capture.busy()
+                or capture.status.state != "idle"
+            ):
+                self.camera_settings_finished.emit(
+                    False, {}, "Kameraeinstellungen nur bei verbundener Kamera und "
+                    "beendeter Aufzeichnung ohne AutoTune-Versuch anwenden."
+                )
+                return False
+            self.camera_settings_updating = True
+            self.camera_idle.clear()
+        warning_count = len(camera.diagnostics.get("warnings", []))
+        try:
+            applied = camera.apply_settings(**value)
+        except Exception as exc:
+            self.camera_settings_finished.emit(False, {}, str(exc))
+            if not isinstance(exc, CameraSettingsError):
+                raise
+            return False
+        finally:
+            with self.api_capture.lock:
+                self.camera_settings_updating = False
+        for warning in camera.diagnostics.get("warnings", [])[warning_count:]:
+            self.message.emit(warning)
+        self.camera_settings_finished.emit(True, applied, "")
+        return True
 
     def command(self, name, value=None):
         try:
@@ -79,6 +121,8 @@ class PipelineWorker(QThread):
                 DemoCamera(self.camera_config) if self.demo else BaumerCamera(self.camera_config)
             )
             camera.open()
+            if capture.status.state == "idle":
+                self.camera_idle.set()
             devices = camera.diagnostics.get("devices", [])
             model = (
                 devices[0].get("model", "Baumer")
@@ -111,6 +155,13 @@ class PipelineWorker(QThread):
                         name, value = self.commands.get_nowait()
                     except queue.Empty:
                         break
+                    if name == "camera_settings":
+                        if self.apply_camera_settings(camera, capture, value):
+                            previous_id = None
+                            frames = 0
+                            fps = 0.0
+                            rate_started = time.perf_counter()
+                        continue
                     if name == "api_start":
                         self.api_capture.start(capture, value)
                         if self.api_capture.busy():
@@ -207,6 +258,10 @@ class PipelineWorker(QThread):
                             self.capture_config = capture.config
                         except (ValueError, RuntimeError) as exc:
                             self.message.emit(f"Aufzeichnungseinstellungen: {exc}")
+                if capture.status.state == "idle":
+                    self.camera_idle.set()
+                else:
+                    self.camera_idle.clear()
                 current = camera.read(timeout=0.2)
                 if current is None:
                     previous_state = capture.status.state
@@ -282,6 +337,7 @@ class PipelineWorker(QThread):
         except Exception as exc:
             self.failed.emit(f"{type(exc).__name__}: {exc}")
         finally:
+            self.camera_idle.clear()
             if camera is not None:
                 try:
                     camera.close()

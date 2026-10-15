@@ -45,6 +45,18 @@ gesetzt und beim regulären Trennen wiederhergestellt. Es werden keine UserSets
 dauerhaft in der Kamera gespeichert. Ein Prozessabbruch kann die Wiederherstellung
 verhindern; dann die gewünschten Einstellungen im Explorer erneut setzen.
 
+**Belichtung und Bildrate ohne Trennen ändern:** Bei verbundener Kamera die
+Belichtungszeit und/oder gewünschte Bildrate bearbeiten und **Kameraeinstellungen
+anwenden** wählen. Beide Werte werden gemeinsam gesetzt; die Bilderfassung pausiert
+kurz, die Kamera bleibt verbunden. Der Button ist verfügbar, wenn die Aufzeichnung
+beendet und nicht scharfgeschaltet ist, kein Speichervorgang und kein AutoTune-Versuch
+läuft. Im Demo-Modus ist er deaktiviert. Das Log zeigt die zurückgelesene Belichtung
+und den Bildrate-Sollwert; die tatsächlich erreichten FPS stehen in der Liveanzeige.
+Ein abgelehnter Wert wird gemeldet und die bisherigen Einstellungen werden
+wiederhergestellt. Andere Kameraeinstellungen (z. B. Trigger oder Kamerabetrieb)
+werden weiterhin beim Verbinden gesetzt. Nach einer Belichtungsänderung einen
+vorhandenen Hintergrund bei **leerer Rutsche** neu aufnehmen.
+
 ## Erster Versuch mit liegendem Bauteil
 
 1. Kamera verbinden. Der Standardpfad lautet

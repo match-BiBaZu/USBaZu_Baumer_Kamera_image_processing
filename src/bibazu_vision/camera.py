@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import time
@@ -31,6 +32,10 @@ class CameraFrame:
     timestamp: float
     frame_id: int
     triggered: bool = False
+
+
+class CameraSettingsError(RuntimeError):
+    """Settings were rejected, but acquisition is still usable."""
 
 
 def find_cti_paths() -> list[str]:
@@ -218,6 +223,100 @@ class BaumerCamera:
             selector_node.value = old_selector
         self.diagnostics["triggers"] = list(self._triggers)
 
+    def _configure_settings(self, exposure_us, fps, rollback=None) -> None:
+        def set_value(name, value, *, required=True):
+            if rollback is not None and _writable(_node(self._nm, name)):
+                old = _value(self._nm, name)
+                if old is None:
+                    raise RuntimeError(f"Kameramerkmal {name} ist nicht lesbar.")
+                rollback.append((name, old))
+            return self._set(name, value, required=required)
+
+        if exposure_us is not None:
+            set_value("ExposureAuto", "Off", required=False)
+            # Preserve gain/color coefficients while fixing image brightness.
+            for name in ("GainAuto", "BalanceWhiteAuto", "ColorTransformationAuto"):
+                current = _value(self._nm, name)
+                if current is None:
+                    continue
+                if not set_value(name, "Off", required=False) and current != "Off":
+                    warning = (
+                        f"{name} ist weiterhin {current}; "
+                        "Helligkeit/Farbe können die Konturerkennung verändern."
+                    )
+                    if warning not in self.diagnostics["warnings"]:
+                        self.diagnostics["warnings"].append(warning)
+            name = (
+                "ExposureTime" if _node(self._nm, "ExposureTime") is not None
+                else "ExposureTimeAbs"
+            )
+            set_value(name, float(exposure_us))
+        if fps is not None:
+            set_value("AcquisitionFrameRateEnable", True, required=False)
+            set_value("AcquisitionFrameRate", float(fps))
+
+    def _refresh_actual(self) -> None:
+        self.diagnostics["actual"] = {
+            name: _value(self._nm, name)
+            for name in (
+                "Width", "Height", "PixelFormat", "ExposureTime", "ExposureTimeAbs",
+                "ExposureAuto", "GainAuto", "Gain", "BalanceWhiteAuto",
+                "ColorTransformationAuto", "AcquisitionFrameRateEnable",
+                "AcquisitionFrameRate", "ResultingFrameRate",
+            )
+        }
+
+    def _restart_after_settings(self) -> None:
+        self._first_acquisition_frame = True
+        # Ignore edges occurring during the preview pause.
+        if self._counter_node is not None:
+            self._last_counter_value = int(self._counter_node.value)
+        if self._line_node is not None:
+            self._last_line_state = bool(self._line_node.value)
+        self._acquirer.start()
+
+    def apply_settings(self, exposure_us: float, fps: float) -> dict[str, float]:
+        """Pause acquisition on this thread, update, and resume the same device.
+
+        A CameraSettingsError means the previous values were recovered. Other
+        errors require the caller to close the camera through its failure path.
+        """
+        if not self._opened:
+            raise RuntimeError("Kamera ist nicht geöffnet.")
+        if not all(math.isfinite(v) and v > 0 for v in (exposure_us, fps)):
+            raise CameraSettingsError("Belichtung und Bildrate müssen positiv und endlich sein.")
+        rollback = []
+        self._acquirer.stop()
+        try:
+            self._configure_settings(exposure_us, fps, rollback)
+            name = (
+                "ExposureTime" if _node(self._nm, "ExposureTime") is not None
+                else "ExposureTimeAbs"
+            )
+            applied = {
+                "exposure_us": float(getattr(self._nm, name).value),
+                "fps": float(self._nm.AcquisitionFrameRate.value),
+            }
+            self._restart_after_settings()
+        except Exception as exc:
+            try:
+                self._acquirer.stop()
+                for name, previous in reversed(rollback):
+                    if _value(self._nm, name) != previous:
+                        getattr(self._nm, name).value = previous
+                self._restart_after_settings()
+                self._refresh_actual()
+            except Exception as recovery:
+                raise RuntimeError(
+                    f"Kameraeinstellungen fehlgeschlagen: {exc}; "
+                    f"Wiederherstellung fehlgeschlagen: {recovery}"
+                ) from recovery
+            raise CameraSettingsError(str(exc)) from exc
+        self.config.exposure_us = applied["exposure_us"]
+        self.config.fps = applied["fps"]
+        self._refresh_actual()
+        return applied
+
     def open(self) -> None:
         if self._opened:
             return
@@ -266,28 +365,7 @@ class BaumerCamera:
                 if _writable(_node(self._nm, "TriggerMode")):
                     self._nm.TriggerMode.value = "Off"
             self._set("AcquisitionMode", "Continuous")
-            if self.config.exposure_us is not None:
-                self._set("ExposureAuto", "Off", required=False)
-                # Keep existing gain/color coefficients while fixing image brightness.
-                for auto_name in ("GainAuto", "BalanceWhiteAuto", "ColorTransformationAuto"):
-                    current_auto = _value(self._nm, auto_name)
-                    if current_auto is None:
-                        continue
-                    applied = self._set(auto_name, "Off", required=False)
-                    if not applied and current_auto != "Off":
-                        self.diagnostics["warnings"].append(
-                            f"{auto_name} ist weiterhin {current_auto}; "
-                            "Helligkeit/Farbe können die Konturerkennung verändern."
-                        )
-                name = (
-                    "ExposureTime"
-                    if _node(self._nm, "ExposureTime") is not None
-                    else "ExposureTimeAbs"
-                )
-                self._set(name, float(self.config.exposure_us))
-            if self.config.fps is not None:
-                self._set("AcquisitionFrameRateEnable", True, required=False)
-                self._set("AcquisitionFrameRate", float(self.config.fps))
+            self._configure_settings(self.config.exposure_us, self.config.fps)
             if self.config.mode != "live":
                 requested = (
                     "AcquisitionStart"
@@ -325,22 +403,7 @@ class BaumerCamera:
             self._acquirer.start()
             self._sequence = 0
             self._opened = True
-            self.diagnostics["actual"] = {
-                name: _value(self._nm, name)
-                for name in (
-                    "Width",
-                    "Height",
-                    "PixelFormat",
-                    "ExposureTime",
-                    "ExposureAuto",
-                    "GainAuto",
-                    "Gain",
-                    "BalanceWhiteAuto",
-                    "ColorTransformationAuto",
-                    "AcquisitionFrameRate",
-                    "ResultingFrameRate",
-                )
-            }
+            self._refresh_actual()
         except Exception as exc:
             self.close()
             message = str(exc) or type(exc).__name__

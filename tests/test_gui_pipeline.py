@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from PyQt6.QtCore import QPoint, QPointF, Qt
 from PyQt6.QtGui import QFont, QFontDatabase
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
+from test_worker import FakeAcquisitionCamera
 
 from bibazu_vision import worker as worker_module
 from bibazu_vision.app import ImageView, MainWindow
@@ -64,6 +66,102 @@ def dispose(window, application):
     window.close()
     window.deleteLater()
     application.processEvents()
+
+
+def test_apply_camera_button_without_frames_pending_edits_language_and_recording_guards(
+    qt_app, tmp_path, monkeypatch
+):
+    cameras = []
+    apply_entered, apply_release = threading.Event(), threading.Event()
+
+    class PendingCamera(FakeAcquisitionCamera):
+        def apply_settings(self, exposure_us, fps):
+            apply_entered.set()
+            assert apply_release.wait(5)
+            return super().apply_settings(exposure_us, fps)
+
+    def factory(config):
+        camera = PendingCamera(config)
+        cameras.append(camera)
+        return camera
+
+    monkeypatch.setattr(worker_module, "BaumerCamera", factory)
+    window = MainWindow(tmp_path)
+    failures = []
+    try:
+        assert not window.apply_camera_button.isEnabled()
+        window.connect_camera(False)
+        window.worker.failed.connect(failures.append)
+        wait_for(qt_app, lambda: window.apply_camera_button.isEnabled())
+        camera = cameras[0]
+        assert window.last_snapshot is None
+        window.exposure.setValue(5000)
+        window.fps.setValue(80)
+        window.set_language("en", persist=False)
+        assert window.exposure.value() == 5000 and window.fps.value() == 80
+        assert window.apply_camera_button.text() == "Apply camera settings"
+        assert camera.settings_calls == []
+        worker = window.worker
+        QTest.mouseClick(window.apply_camera_button, Qt.MouseButton.LeftButton)
+        wait_for(qt_app, apply_entered.is_set)
+        assert window.camera_settings_pending
+        assert not window.apply_camera_button.isEnabled()
+        # Further edits while an update is in flight stay pending in the form.
+        window.exposure.setValue(6000)
+        window.set_language("de", persist=False)
+        assert window.exposure.value() == 6000
+        assert window.apply_camera_button.text() == "Kameraeinstellungen anwenden"
+        apply_release.set()
+        wait_for(qt_app, lambda: not window.camera_settings_pending)
+        assert len(camera.settings_calls) == 1
+        assert camera.settings_calls[0][1:] == (5000, 80)
+        assert window.worker is worker
+        assert window.exposure.value() == 6000
+        window.set_language("en", persist=False)
+        assert "Camera settings applied: 5000 µs" in window.log.toPlainText()
+        assert "Requested frame rate 80 FPS" in window.log.toPlainText()
+        assert "chute empty" in window.log.toPlainText()
+        window.command("arm")
+        wait_for(qt_app, lambda: not window.apply_camera_button.isEnabled())
+        assert window.last_snapshot is None
+        window.command("disarm")
+        wait_for(qt_app, lambda: window.apply_camera_button.isEnabled())
+        camera.send_frame()
+        wait_for(qt_app, lambda: window.last_snapshot is not None)
+        apply_entered.clear()
+        apply_release.clear()
+        window.apply_camera_settings()
+        wait_for(qt_app, apply_entered.is_set)
+        # Preview/status refresh must remain responsive during slow SDK writes.
+        window.refresh_live()
+        assert window.camera_settings_pending and not failures
+        assert worker.camera_settings_updating
+        apply_release.set()
+        wait_for(qt_app, lambda: not window.camera_settings_pending)
+        assert camera.settings_calls[-1][1:] == (6000, 80)
+        wait_for(qt_app, lambda: window.apply_camera_button.isEnabled())
+        # Failed enqueue must clear the pending UI state immediately.
+        with monkeypatch.context() as patcher:
+            patcher.setattr(worker, "command", lambda *args: False)
+            window.apply_camera_settings()
+        assert not window.camera_settings_pending and window.apply_camera_button.isEnabled()
+        window.disconnect_camera()
+        assert not window.apply_camera_button.isEnabled()
+        wait_for(qt_app, lambda: not worker.isRunning())
+        assert camera.closed.is_set() and failures == []
+    finally:
+        apply_release.set()
+        dispose(window, qt_app)
+
+
+def test_apply_camera_button_disabled_in_demo(qt_app, tmp_path):
+    window = MainWindow(tmp_path)
+    try:
+        window.connect_camera(True)
+        wait_for(qt_app, lambda: window.last_snapshot is not None)
+        assert not window.apply_camera_button.isEnabled()
+    finally:
+        dispose(window, qt_app)
 
 
 def test_demo_motion_capture_persists_then_replays_and_steps(qt_app, tmp_path):

@@ -1,6 +1,7 @@
 """HTTP + Qt pipeline integration using a synthetic queued camera only."""
 
 import os
+import threading
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -99,6 +100,37 @@ def harness(tmp_path, monkeypatch):
 
 def blank(camera):
     camera.items.put((np.full((64, 96), 185, dtype=np.uint8), False))
+
+
+def test_trial_start_rejects_settings_in_flight_without_blocking_and_can_retry(
+    harness, monkeypatch
+):
+    start, wait = harness
+    worker, camera, api, request, headers = start("manual")
+    entered, release = threading.Event(), threading.Event()
+    apply = camera.apply_settings
+
+    def delayed_apply(**values):
+        entered.set()
+        assert release.wait(5)
+        return apply(**values)
+
+    monkeypatch.setattr(camera, "apply_settings", delayed_apply)
+    body = {"run_id": "run-settings", "trial_id": "trial-settings"}
+    worker.command("camera_settings", {"exposure_us": 5000, "fps": 80})
+    try:
+        wait(entered.is_set)
+        response = request("POST", "trials", json=body, headers=headers)
+        assert response.status_code == 409
+        assert "Kameraeinstellungen" in response.text
+        assert not worker.api_capture.busy()
+        assert request("GET", "trials/trial-settings").status_code == 404
+    finally:
+        release.set()
+    wait(lambda: not worker.camera_settings_updating)
+    assert request("POST", "trials", json=body, headers=headers).status_code == 202
+    assert request("POST", "trials/trial-settings/abort", headers=headers).status_code == 202
+    wait(lambda: not worker.api_capture.busy())
 
 
 @pytest.mark.parametrize("mode", ["motion", "hardware", "manual"])

@@ -185,6 +185,7 @@ class MainWindow(QMainWindow):
         self._last_note = None
         self._qt_translator = QTranslator(self)
         self.worker = None
+        self.camera_settings_pending = False
         self.last_snapshot = None
         self.last_frame = None
         self.clip = None
@@ -397,6 +398,11 @@ class MainWindow(QMainWindow):
         self.fps = spin(self.profile.get("fps", 200), 1, 2000, 1, " FPS")
         form.addRow("Belichtungszeit", self.exposure)
         form.addRow("Gewünschte Bildrate", self.fps)
+        self.apply_camera_button = self.button(
+            "Kameraeinstellungen anwenden", self.apply_camera_settings
+        )
+        self.apply_camera_button.setEnabled(False)
+        form.addRow(self.apply_camera_button)
         self.camera_mode = QComboBox()
         for text, mode in [
             ("Live + Eingang beobachten", "live"),
@@ -424,8 +430,9 @@ class MainWindow(QMainWindow):
         form.addRow(row)
         form.addRow(self.button("Demo starten", lambda: self.connect_camera(True)))
         hint = QLabel(
-            "Belichtung / Bildrate werden beim Verbinden gesetzt. "
-            "Tatsächliche FPS siehe Liveanzeige."
+            "Belichtung / Bildrate beim Verbinden oder mit Anwenden setzen. "
+            "Aufzeichnung vorher beenden. Andere Kameraeinstellungen benötigen erneutes "
+            "Verbinden. Tatsächliche FPS siehe Liveanzeige."
         )
         hint.setWordWrap(True)
         form.addRow(hint)
@@ -693,9 +700,12 @@ class MainWindow(QMainWindow):
         self.worker.message.connect(self.note)
         self.worker.failed.connect(self.camera_error)
         self.worker.recording_failed.connect(self.recording_error)
+        self.worker.camera_settings_finished.connect(self.camera_settings_finished)
         self.worker.finished.connect(self.worker_finished)
         self.last_frame = None
         self.last_snapshot = None
+        self.camera_settings_pending = False
+        self.apply_camera_button.setEnabled(False)
         self.connect_button.setEnabled(False)
         self.output_path.setEnabled(False)
         self.output_button.setEnabled(False)
@@ -705,6 +715,8 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
     def worker_finished(self):
+        self.camera_settings_pending = False
+        self.apply_camera_button.setEnabled(False)
         self.connect_button.setEnabled(True)
         self.processing_group.setEnabled(True)
         self.output_path.setEnabled(True)
@@ -734,7 +746,41 @@ class MainWindow(QMainWindow):
     def disconnect_camera(self):
         if self.worker is not None:
             self.worker.stop()
+            self.apply_camera_button.setEnabled(False)
             self.ui_text(self.state_label, "Kamera wird getrennt; Aufzeichnung wird gespeichert …")
+
+    def refresh_camera_settings_button(self):
+        self.apply_camera_button.setEnabled(
+            self.worker is not None and self.worker.isRunning()
+            and not self.camera_settings_pending and self.worker.camera_settings_available()
+        )
+
+    def apply_camera_settings(self):
+        self.refresh_camera_settings_button()
+        if not self.apply_camera_button.isEnabled():
+            return
+        self.camera_settings_pending = True
+        self.apply_camera_button.setEnabled(False)
+        if not self.worker.command(
+            "camera_settings", {"exposure_us": self.exposure.value(), "fps": self.fps.value()}
+        ):
+            self.camera_settings_pending = False
+            self.refresh_camera_settings_button()
+
+    def camera_settings_finished(self, success, applied, error):
+        self.camera_settings_pending = False
+        if success:
+            self.note(
+                f"Kameraeinstellungen angewendet: {applied['exposure_us']:g} µs · "
+                f"Bildrate-Sollwert {applied['fps']:g} FPS."
+            )
+            self.note(
+                "Nach Belichtungsänderung vorhandenen Hintergrund bei leerer Rutsche "
+                "neu aufnehmen."
+            )
+        else:
+            self.note(f"Kameraeinstellungen nicht angewendet: {error}")
+        self.refresh_camera_settings_button()
 
     def command(self, name, value=None):
         if self.worker is None or not self.worker.isRunning():
@@ -786,6 +832,7 @@ class MainWindow(QMainWindow):
         self.command("arm")
 
     def refresh_live(self):
+        self.refresh_camera_settings_button()
         if self.worker is None or not self.worker.isRunning():
             return
         snapshot = self.worker.snapshot()

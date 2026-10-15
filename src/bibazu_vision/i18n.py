@@ -29,6 +29,39 @@ ENGLISH = {
     "Seriennummer (optional)": "Serial number (optional)",
     "Belichtungszeit": "Exposure time",
     "Gewünschte Bildrate": "Requested frame rate",
+    "Kameraeinstellungen anwenden": "Apply camera settings",
+    "Kameraeinstellungen werden angewendet; Versuch später starten.": (
+        "Camera settings are being applied; start the trial later."
+    ),
+    (
+        "Belichtung / Bildrate beim Verbinden oder mit Anwenden setzen. "
+        "Aufzeichnung vorher beenden. Andere Kameraeinstellungen benötigen erneutes "
+        "Verbinden. Tatsächliche FPS siehe Liveanzeige."
+    ): (
+        "Set exposure and frame rate when connecting or with Apply. Stop recording first. "
+        "Other camera settings require reconnecting. See the live display for actual FPS."
+    ),
+    (
+        "Kameraeinstellungen angewendet: {exposure:g} µs · Bildrate-Sollwert {fps:g} FPS."
+    ): "Camera settings applied: {exposure:g} µs · Requested frame rate {fps:g} FPS.",
+    "Kameraeinstellungen nicht angewendet: {error}": "Camera settings not applied: {error}",
+    (
+        "Nach Belichtungsänderung vorhandenen Hintergrund bei leerer Rutsche neu aufnehmen."
+    ): "After changing exposure, recapture any existing background with the chute empty.",
+    (
+        "Kameraeinstellungen nur bei verbundener Kamera und beendeter Aufzeichnung "
+        "ohne AutoTune-Versuch anwenden."
+    ): (
+        "Apply camera settings only with the camera connected, recording stopped "
+        "and no AutoTune trial."
+    ),
+    (
+        "Belichtung und Bildrate müssen positiv und endlich sein."
+    ): "Exposure and frame rate must be positive and finite.",
+    "Kameraeinstellungen fehlgeschlagen: {error}; Wiederherstellung fehlgeschlagen: {recovery}": (
+        "Camera settings failed: {error}; Recovery failed: {recovery}"
+    ),
+    "Kameramerkmal {name} ist nicht lesbar.": "Camera feature {name} is not readable.",
     "Live + Eingang beobachten": "Live + monitor input",
     "Hardware startet Bildfolge": "Hardware starts image sequence",
     "Hardware: Einzelbild pro Impuls": "Hardware: one frame per pulse",

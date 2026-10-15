@@ -16,7 +16,7 @@ from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
 from bibazu_vision import worker as worker_module
-from bibazu_vision.camera import CameraConfig, CameraFrame
+from bibazu_vision.camera import CameraConfig, CameraFrame, CameraSettingsError
 from bibazu_vision.processing import ProcessingConfig
 from bibazu_vision.recording import CaptureConfig, CaptureManager, load_clip
 
@@ -48,12 +48,23 @@ class FakeAcquisitionCamera:
         self.rearm_count = 0
         self.read_count = 0
         self.frame_id = 0
+        self.settings_calls = []
+        self.settings_error = None
 
     def open(self):
         self.opened.set()
 
     def rearm_acquisition(self):
         self.rearm_count += 1
+
+    def apply_settings(self, exposure_us, fps):
+        self.settings_calls.append((threading.get_ident(), exposure_us, fps))
+        if self.settings_error:
+            raise self.settings_error
+        self.config.exposure_us = exposure_us
+        self.config.fps = fps
+        self.diagnostics["actual"] = {"ExposureTime": exposure_us, "AcquisitionFrameRate": fps}
+        return {"exposure_us": exposure_us, "fps": fps}
 
     def read(self, timeout=0.2):
         self.read_count += 1
@@ -348,6 +359,119 @@ def track_recorders(monkeypatch):
 
     monkeypatch.setattr(worker_module, "CaptureManager", capture_factory)
     return recorders
+
+
+def test_camera_settings_apply_before_first_frame_on_worker_and_reach_clip_metadata(
+    qt_app, worker_harness
+):
+    worker, camera, failures, _ = worker_harness(commands=())
+    results = []
+    worker.camera_settings_finished.connect(lambda *args: results.append(args))
+    wait_for(qt_app, worker.camera_settings_available)
+    assert worker.snapshot() is None
+    worker.command("camera_settings", {"exposure_us": 5000, "fps": 80})
+    wait_for(qt_app, lambda: bool(results))
+    assert results == [(True, {"exposure_us": 5000, "fps": 80}, "")]
+    assert camera.settings_calls[0][0] != threading.get_ident()
+    assert worker.isRunning() and not camera.closed.is_set()
+    worker.command("trigger")
+    camera.send_frame()
+    wait_for(qt_app, lambda: state(worker) == "waiting")
+    worker.command("disarm")
+    clip = completed_clip(qt_app, worker)
+    assert clip.manifest["metadata"]["camera"]["actual"] == {
+        "ExposureTime": 5000, "AcquisitionFrameRate": 80,
+    }
+    assert failures == []
+
+
+@pytest.mark.parametrize("command", ["arm", "trigger"])
+def test_camera_settings_guard_rechecks_queued_arm_and_trigger_without_frames(
+    qt_app, worker_harness, command
+):
+    worker, camera, failures, _ = worker_harness(commands=())
+    results = []
+    worker.camera_settings_finished.connect(lambda *args: results.append(args))
+    worker.command(command)
+    worker.command("camera_settings", {"exposure_us": 5000, "fps": 80})
+    wait_for(qt_app, lambda: bool(results))
+    assert results[0][0] is False
+    assert camera.settings_calls == []
+    assert not worker.camera_settings_available()
+    assert worker.snapshot() is None and failures == []
+
+
+def test_camera_settings_guard_blocks_api_reservation_before_trial_command(
+    qt_app, worker_harness
+):
+    worker, camera, failures, _ = worker_harness(commands=())
+    results = []
+    worker.camera_settings_finished.connect(lambda *args: results.append(args))
+    # Match create() reserving an ID before api_start reaches the worker.
+    with worker.api_capture.lock:
+        worker.api_capture.active_id = "pending-test"
+        worker.api_capture.trials["pending-test"] = {"status": "pending"}
+        worker.command("camera_settings", {"exposure_us": 5000, "fps": 80})
+    wait_for(qt_app, lambda: bool(results))
+    assert results[0][0] is False
+    assert camera.settings_calls == []
+    assert not worker.camera_settings_available()
+    with worker.api_capture.lock:
+        worker.api_capture.active_id = None
+    assert failures == []
+
+
+@pytest.mark.parametrize("recoverable", [True, False])
+def test_camera_settings_errors_report_completion_and_only_fatal_errors_stop_worker(
+    qt_app, worker_harness, recoverable
+):
+    worker, camera, failures, _ = worker_harness(commands=())
+    results = []
+    worker.camera_settings_finished.connect(lambda *args: results.append(args))
+    camera.settings_error = (
+        CameraSettingsError("outside camera range") if recoverable else OSError("USB lost")
+    )
+    worker.command("camera_settings", {"exposure_us": 5000, "fps": 80})
+    wait_for(qt_app, lambda: bool(results))
+    assert results[0][0] is False
+    if recoverable:
+        assert worker.isRunning() and not camera.closed.is_set() and failures == []
+        camera.settings_error = None
+        worker.command("camera_settings", {"exposure_us": 5000, "fps": 80})
+        wait_for(qt_app, lambda: len(results) == 2)
+        assert results[-1][0] is True
+    else:
+        wait_for(qt_app, lambda: not worker.isRunning())
+        assert camera.closed.is_set()
+        assert failures == ["OSError: USB lost"]
+
+
+def test_camera_settings_guard_blocks_saving(qt_app, worker_harness, monkeypatch):
+    recorders = track_recorders(monkeypatch)
+    entered, release = threading.Event(), threading.Event()
+    persist = CaptureManager._persist
+
+    def blocked_writer(self, capture):
+        entered.set()
+        assert release.wait(5)
+        return persist(self, capture)
+
+    monkeypatch.setattr(CaptureManager, "_persist", blocked_writer)
+    worker, camera, failures, _ = worker_harness(commands=("trigger",))
+    results = []
+    worker.camera_settings_finished.connect(lambda *args: results.append(args))
+    try:
+        camera.send_frame()
+        wait_for(qt_app, lambda: state(worker) == "waiting")
+        worker.command("disarm")
+        wait_for(qt_app, entered.is_set)
+        assert recorders[0].status.state == "saving"
+        worker.command("camera_settings", {"exposure_us": 5000, "fps": 80})
+        wait_for(qt_app, lambda: bool(results))
+        assert results[0][0] is False and camera.settings_calls == []
+        assert not worker.camera_settings_available() and failures == []
+    finally:
+        release.set()
 
 
 def test_disk_full_is_reported_without_new_frames_and_camera_remains_live(
