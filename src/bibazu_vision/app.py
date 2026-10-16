@@ -43,6 +43,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from .api import VisionApi
 from .camera import CameraConfig
 from .i18n import translate, translate_message
 from .processing import ProcessingConfig, render_overlay
@@ -205,6 +206,8 @@ class MainWindow(QMainWindow):
         self.play_timer.timeout.connect(self.advance_review)
         self.play_timer.setInterval(16)
         self.refresh_recordings()
+        self.control_api = VisionApi(self)
+        self.control_api.start()
         if demo:
             QTimer.singleShot(0, lambda: self.connect_camera(True))
 
