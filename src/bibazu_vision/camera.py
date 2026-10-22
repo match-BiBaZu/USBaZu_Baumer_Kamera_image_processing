@@ -364,7 +364,14 @@ class BaumerCamera:
                 self._nm.TriggerSelector.value = saved["selector"]
                 if _writable(_node(self._nm, "TriggerMode")):
                     self._nm.TriggerMode.value = "Off"
-            self._set("AcquisitionMode", "Continuous")
+            acquisition_mode = _node(self._nm, "AcquisitionMode")
+            if acquisition_mode is not None:
+                if _writable(acquisition_mode):
+                    self._set("AcquisitionMode", "Continuous")
+                else:
+                    self.diagnostics["warnings"].append(
+                        "AcquisitionMode ist schreibgeschützt; vorhandener Modus wird beibehalten."
+                    )
             self._configure_settings(self.config.exposure_us, self.config.fps)
             if self.config.mode != "live":
                 requested = (

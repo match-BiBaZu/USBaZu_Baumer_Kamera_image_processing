@@ -14,7 +14,91 @@ ENGLISH = {
     "Kontur, OBB und Messachse anzeigen": "Show contour, OBB and measurement axis",
     "Segmentierung: noch kein Bild": "Segmentation: no image yet",
     "Winkelverlauf der Vorschau · ±90°": "Preview angle history · ±90°",
+    "Fortlaufender Achswinkel · Lücken markiert": "Continuous angle history · gaps marked",
+    "Historie · t = {seconds:.3f} s · Messwinkel {raw} · Fortlaufend {angle}": (
+        "History · t = {seconds:.3f} s · Measured angle {raw} · Continuous {angle}"
+    ),
+    "t = {seconds:.3f} s · Messwinkel {raw} · Fortlaufend {angle}": (
+        "t = {seconds:.3f} s · Measured angle {raw} · Continuous {angle}"
+    ),
+    "Klick rastet zum nächsten Vorschauframe ein.": "Click snaps to the nearest preview frame.",
+    "Kein geeigneter Umriss": "No suitable contour",
+    "Uneindeutige Achse": "Ambiguous axis",
+    "Randkontakt": "Border contact",
+    "Ungültiger Messwert": "Invalid measurement",
+    "Fortführung nach ungültigem Messwert neu angesetzt": (
+        "Continuous angle restarted after an invalid measurement"
+    ),
+    "Frame-ID-Unterbrechung": "Frame ID discontinuity",
+    "Messpuffer übergelaufen": "Measurement buffer overflow",
+    "Messwerte fehlen": "Missing measurements",
+    "Zeitlücke über 50 ms": "Time gap exceeding 50 ms",
+    "Messkonfiguration geändert": "Measurement configuration changed",
+    "Winkelschritt um 90° uneindeutig": "Ambiguous 90° angle step",
+    (
+        "ID {frame_id} · ID-Lücken {gaps} · {ms:.1f} ms · Ende: {reason}\n"
+        "Messrate {measured}/s · Vorschau {previewed}/s · Gültig {valid:.0%} · "
+        "Pufferüberläufe {overflows} · Ohne Vorschau {skipped} (Messwerte vorhanden)"
+    ): (
+        "ID {frame_id} · ID gaps {gaps} · {ms:.1f} ms · End: {reason}\n"
+        "Measurements {measured}/s · Preview {previewed}/s · Valid {valid:.0%} · "
+        "Buffer overflows {overflows} · Without preview {skipped} (measurements retained)"
+    ),
+    "Livebild": "Live image",
+    "Live": "Live",
+    "Sichtbarer Zeitraum": "Visible time range",
+    "Historie · t = {seconds:.3f} s": "History · t = {seconds:.3f} s",
+    "— ° · Historie": "— ° · History",
+    "{angle:+.2f} ° · Historie": "{angle:+.2f} ° · History",
+    "Historischer Messwert": "Historical measurement",
+    "Kein gültiger Winkel": "No valid angle",
+    "Historisches Vorschaubild · Messmarkierungen vom Aufnahmezeitpunkt": (
+        "Historical preview · measurement overlay from capture time"
+    ),
+    "Historisches Bild wird geladen …": "Loading historical image …",
+    "Historisches Bild nicht verfügbar.": "Historical image unavailable.",
+    "Der ausgewählte Zeitpunkt liegt außerhalb der zehnminütigen Historie.": (
+        "The selected time is outside the ten-minute history."
+    ),
+    "Bildhistorie wird noch geschlossen. Fenster erneut schließen.": (
+        "Image history is still closing. Close the window again."
+    ),
     "Live & Erkennung": "Live & detection",
+    "Durchläufe aufnehmen": "Record passages",
+    "Auswertung": "Review",
+    "Verbinden": "Connect",
+    "Demo": "Demo",
+    "Nicht verbunden": "Disconnected",
+    "Verbinde …": "Connecting …",
+    "Wird getrennt …": "Disconnecting …",
+    "Demo verbunden": "Demo connected",
+    "Kamera verbunden": "Camera connected",
+    "Protokoll & Details": "Log & details",
+    "Noch keine Bilddaten": "No frame data yet",
+    "Kamera": "Camera",
+    "Erkennung & Referenz": "Detection & reference",
+    "Weitere Erkennungseinstellungen": "More detection settings",
+    "Weitere Aufnahmeeinstellungen": "More recording settings",
+    "Aufnahme": "Recording",
+    "Gespeicherte Durchläufe": "Saved passages",
+    "Livebild · Aktuelle Messung": "Live image · Current measurement",
+    "Keine Aufzeichnung aktiv": "No recording active",
+    "Noch kein Durchlauf gespeichert.": "No passage saved yet.",
+    "In Auswertung öffnen": "Open in review",
+    "Gespeichert: {name}": "Saved: {name}",
+    "Bereit": "Ready",
+    "Scharfgeschaltet": "Armed",
+    "Wartet auf Bewegung": "Waiting for motion",
+    "Aufnahme läuft": "Recording in progress",
+    "Wird gespeichert": "Saving",
+    "Aufzeichnung: {state}{error}{stale}": "Recording: {state}{error}{stale}",
+    "Aufzeichnung: {state} · {frames} Bilder · {mib:.1f} MiB{error}{stale}": (
+        "Recording: {state} · {frames} frames · {mib:.1f} MiB{error}{stale}"
+    ),
+    "ID {frame_id} · ID-Lücken {gaps} · {ms:.1f} ms · Ende: {reason}": (
+        "ID {frame_id} · ID gaps {gaps} · {ms:.1f} ms · End: {reason}"
+    ),
+    "Randprüfung deaktivieren": "Disable border check",
     "Durchlauf · Zeitlupe": "Passage · slow motion",
     "Gespeicherten Durchlauf rechts auswählen.": "Select a saved passage on the right.",
     "◀ Bild": "◀ Frame",
@@ -291,7 +375,7 @@ ENGLISH = {
     "Kamera-API konnte nicht starten: {error}": "Could not start camera API: {error}",
 }
 
-_HUMAN_FIELDS = {"error", "stale", "border", "supported"}
+_HUMAN_FIELDS = {"error", "stale", "border", "supported", "state"}
 
 
 def translate(source: str, language: str, **values) -> str:

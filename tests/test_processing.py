@@ -129,6 +129,14 @@ def test_no_part_tiny_noise_and_border_touch_are_distinguished():
     assert clipped.angle_deg is None  # A clipped silhouette must not claim a tilt measurement.
 
 
+def test_border_touch_can_be_ignored_for_angle_measurement():
+    processor = FrameProcessor(ProcessingConfig(min_area=150, ignore_border_touch=True))
+    result = processor.process(silhouette(0, center=(34, 160)))
+    assert result.touching_border
+    assert result.angle_deg is not None
+    assert abs(wrap_axis_angle(result.angle_deg)) < 1.0
+
+
 def test_motion_counts_change_in_roi_then_stops_for_stationary_object():
     config = ProcessingConfig(threshold=150, roi=(100, 70, 220, 230))
     processor = FrameProcessor(config)

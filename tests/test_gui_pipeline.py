@@ -89,6 +89,7 @@ def test_apply_camera_button_without_frames_pending_edits_language_and_recording
     window = MainWindow(tmp_path)
     failures = []
     try:
+        window.camera_section.set_expanded(True)
         assert not window.apply_camera_button.isEnabled()
         window.connect_camera(False)
         window.worker.failed.connect(failures.append)
@@ -194,6 +195,13 @@ def test_demo_motion_capture_persists_then_replays_and_steps(qt_app, tmp_path):
             description="fully visible demo part",
         )
         screenshot(window, "gui_live_demo.png")
+        historical = window.trace.samples[-1]
+        window.trace.select_at(historical.timestamp - window.trace.origin)
+        wait_for(qt_app, lambda: window.live_view.source is not None)
+        historical_image = window.live_view.source.cacheKey()
+        assert window.history_selection is historical
+        assert "Historie" in window.angle_label.text()
+        screenshot(window, "gui_history_demo.png")
         wait_for(
             qt_app,
             lambda: window.last_saved is not None or bool(failures),
@@ -202,6 +210,13 @@ def test_demo_motion_capture_persists_then_replays_and_steps(qt_app, tmp_path):
         )
         assert failures == []
         assert window.last_saved is not None
+        # Saving and live measurement continue while the selected image stays pinned.
+        assert window.last_snapshot["frame_id"] > historical.frame_id
+        assert window.history_selection is historical
+        assert window.live_view.source.cacheKey() == historical_image
+        QTest.mouseClick(window.live_button, Qt.MouseButton.LeftButton)
+        assert window.history_selection is None and window.trace.follow_live
+        assert window.live_view.source.cacheKey() != historical_image
         window.command("disarm")
         window.open_clip(window.last_saved)
         clip = window.clip
@@ -212,7 +227,7 @@ def test_demo_motion_capture_persists_then_replays_and_steps(qt_app, tmp_path):
         timestamp_differences = np.diff(clip.timestamps)
         assert np.all(timestamp_differences > 0)
         assert not clip.frames[0].flags.writeable
-        assert window.tabs.currentIndex() == 1
+        assert window.tabs.currentWidget() is window.review_page
         assert window.slider.maximum() == len(clip.frames) - 1
         angles = [
             (i, measurement["angle_deg"])
@@ -358,7 +373,7 @@ def test_native_profile_does_not_hide_demo_and_is_preserved_on_close(qt_app, tmp
         wait_for(
             qt_app, lambda: window.last_snapshot is not None, description="native profile restore"
         )
-        assert window.last_snapshot["config"] == native_processing
+        assert window.last_snapshot["config"] == {**native_processing, "ignore_border_touch": False}
         assert window.start_mode.currentData() == "hardware"
         assert window.threshold.value() == 74
         assert window.area.value() == 10000
@@ -453,5 +468,100 @@ def test_roi_and_chute_selection_send_original_coordinates(qt_app, tmp_path, mon
         assert (
             len(commands) == sent_commands
         )  # Invalid ROI selection must keep acquisition running.
+    finally:
+        dispose(window, qt_app)
+
+
+def test_history_keeps_matching_image_live_data_language_and_connection_lifecycle(
+    qt_app, tmp_path, monkeypatch
+):
+    cameras = []
+
+    def factory(config):
+        camera = FakeAcquisitionCamera(config)
+        cameras.append(camera)
+        return camera
+
+    monkeypatch.setattr(worker_module, "BaumerCamera", factory)
+    window = MainWindow(tmp_path)
+    try:
+        window.overlay_check.setChecked(False)
+        window.connect_camera(False)
+        wait_for(qt_app, lambda: bool(cameras))
+        camera = cameras[0]
+        camera.send_frame(x=20)
+        wait_for(qt_app, lambda: len(window.trace.samples) == 1)
+        sample = window.trace.samples[0]
+        assert sample.timestamp == window.last_snapshot["timestamp"]
+        assert sample.frame_id == window.last_snapshot["frame_id"]
+        # Repeated status refreshes do not add duplicate samples.
+        for _ in range(3):
+            window.refresh_live()
+        assert len(window.trace.samples) == 1
+        QTest.qWait(45)
+        camera.send_frame(x=45)
+        wait_for(qt_app, lambda: len(window.trace.samples) == 2)
+        window.trace.select_at(sample.timestamp - window.trace.origin)
+        wait_for(qt_app, lambda: window.live_view.source is not None)
+        selected_pixels = window.live_view.source
+        assert selected_pixels.pixelColor(25, 30).red() == pytest.approx(30, abs=12)
+        assert window.history_selection == sample
+        assert not window.overlay_check.isEnabled()
+        window.history_image_loaded(
+            window.history_archive, sample.key + 1, np.zeros((10, 10, 3), np.uint8)
+        )
+        assert window.live_view.source is selected_pixels
+        angle_text = window.angle_label.text()
+        QTest.qWait(45)
+        camera.send_frame(x=55)
+        wait_for(qt_app, lambda: window.last_snapshot["frame_id"] == 3)
+        assert window.worker.snapshot()["frame_id"] == 3
+        assert window.live_view.source is selected_pixels
+        assert window.angle_label.text() == angle_text
+        assert window.control_api.state()["processing"] == window.last_snapshot["config"]
+        window.set_language("en", persist=False)
+        assert "History" in window.history_status.text()
+        assert "History" in window.angle_label.text()
+        assert window.history_selection == sample
+        assert window.live_view.source is selected_pixels
+        window.set_language("de", persist=False)
+        # ROI selection must operate on original live pixels, never the JPEG preview.
+        window.select_image("roi")
+        assert window.history_selection is None
+        assert window.trace.follow_live
+        assert window.overlay_check.isEnabled()
+        assert window.live_view.mode == "roi"
+        assert window.live_view.source.pixelColor(25, 30).red() == 185
+        assert window.live_view.source.width() == window.last_snapshot["image"].shape[1]
+        window.trace.select_at(sample.timestamp - window.trace.origin)
+        wait_for(qt_app, lambda: window.live_view.source is not None)
+        old_archive = window.history_archive
+        old_directory = old_archive.directory
+        worker = window.worker
+        window.disconnect_camera()
+        wait_for(qt_app, lambda: not worker.isRunning())
+        assert window.history_selection == sample
+        window.trace.select_at(sample.timestamp - window.trace.origin)
+        wait_for(qt_app, lambda: window.live_view.source is not None)
+        assert window.live_view.source.pixelColor(25, 30).red() == pytest.approx(30, abs=12)
+        (old_directory / f"{sample.key}.jpg").unlink()
+        window.trace.select_at(sample.timestamp - window.trace.origin)
+        wait_for(qt_app, lambda: "nicht verfügbar" in window.live_view.text())
+        assert window.live_view.source is None
+        assert window.history_selection == sample
+        window.connect_camera(False)
+        assert window.history_selection is None
+        assert not window.trace.samples
+        assert window.history_archive is not old_archive
+        wait_for(qt_app, lambda: not old_archive.isRunning())
+        assert not old_directory.exists()
+        # A delayed response from the previous connection must not replace live pixels.
+        window.history_image_loaded(old_archive, sample.key, np.zeros((10, 10, 3), np.uint8))
+        assert window.live_view.source is None
+        wait_for(qt_app, lambda: len(cameras) == 2)
+        cameras[1].send_frame(x=45)
+        wait_for(qt_app, lambda: len(window.trace.samples) == 1)
+        assert window.trace.samples[0].key == 0
+        assert "Historie" not in window.angle_label.text()
     finally:
         dispose(window, qt_app)

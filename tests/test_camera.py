@@ -45,9 +45,10 @@ def test_packed_format_does_not_silently_produce_wrong_pixels():
 
 
 class Node:
-    def __init__(self, value, choices=()):
+    def __init__(self, value, choices=(), writable=True):
         self.value = value
         self.choices = list(choices)
+        self.writable = writable
 
 
 class FakeAcquirer:
@@ -133,6 +134,24 @@ def test_live_close_restores_mode_and_trigger_settings():
     assert acquirer.node_map.AcquisitionMode.value == "SingleFrame"
     assert acquirer.node_map.TriggerMode.value == "On"
     assert acquirer.node_map.TriggerActivation.value == "FallingEdge"
+
+
+def test_open_allows_read_only_acquisition_mode():
+    acquirer = FakeAcquirer()
+    acquirer.node_map.AcquisitionMode = Node(
+        "SingleFrame", ["SingleFrame", "Continuous"], writable=False
+    )
+    camera = BaumerCamera(CameraConfig(cti_path="test.cti"))
+    with patch("harvesters.core.Harvester", return_value=FakeHarvester(acquirer)), patch(
+        "bibazu_vision.camera._writable",
+        side_effect=lambda node: False if node is None else getattr(node, "writable", True),
+    ), patch(
+        "bibazu_vision.camera._entries",
+        side_effect=lambda nm, name: getattr(nm, name, SimpleNamespace(choices=[])).choices,
+    ):
+        camera.open()
+        assert camera.is_open
+        assert acquirer.node_map.AcquisitionMode.value == "SingleFrame"
 
 
 class RecycledBuffer:

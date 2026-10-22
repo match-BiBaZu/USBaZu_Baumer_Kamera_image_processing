@@ -25,6 +25,9 @@ class ProcessingConfig:
     Without one, it is the absolute intensity cutoff for dark/light foreground.
     ``scale`` reduces computation only; all returned geometry uses original pixels.
     ``zero_offset_deg`` is the measured resting angle *relative to the chute*.
+    ``ignore_border_touch`` allows a valid axis to be used even when the contour
+    reaches the image border; useful when the part is intentionally close to the
+    ROI edge and a rough measurement is preferred over rejecting the frame.
     """
 
     threshold: float = 25
@@ -35,6 +38,7 @@ class ProcessingConfig:
     method: str = "obb"
     foreground: str = "dark"
     scale: float = 1.0
+    ignore_border_touch: bool = False
 
 
 @dataclass
@@ -258,8 +262,9 @@ class FrameProcessor:
         if anisotropy >= 0.08:
             detection.axis_deg = axis
             # Cropping can rotate the major axis by 90 degrees as a part leaves
-            # the ROI. Keep the geometric overlay, but do not publish a tilt.
-            if not touching:
+            # the ROI. Keep the geometric overlay, but do not publish a tilt unless
+            # the user explicitly allows border-touch measurements.
+            if not touching or self.config.ignore_border_touch:
                 detection.angle_deg = wrap_axis_angle(
                     axis - self.config.chute_angle_deg - self.config.zero_offset_deg
                 )
@@ -320,12 +325,12 @@ def render_overlay(image: np.ndarray, detection: Detection, config: ProcessingCo
         2,
     )
     angle_text = "ambiguous" if detection.contour is not None else "no part"
-    if detection.touching_border:
+    if detection.touching_border and not config.ignore_border_touch:
         angle_text = "clipped"
     if detection.angle_deg is not None:
         angle_text = f"{detection.angle_deg:+.1f} deg"
     text = f"{config.method.upper()}  {angle_text}  quality {detection.confidence:.2f}"
-    if detection.touching_border:
+    if detection.touching_border and not config.ignore_border_touch:
         text += "  ROI BORDER"
     cv2.putText(output, text, (12, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 4, cv2.LINE_AA)
     cv2.putText(

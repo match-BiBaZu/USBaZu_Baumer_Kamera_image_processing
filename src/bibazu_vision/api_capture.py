@@ -7,6 +7,7 @@ import json
 import threading
 import time
 from collections import deque
+from itertools import islice
 
 from .local_api_runtime import ApiError
 from .recording import CaptureConfig, _measurement
@@ -80,9 +81,23 @@ class ApiCapture:
         return result
 
     def measurements(self, after, limit):
+        return self._read_measurements(after, limit, history=False)
+
+    def history_measurements(self, after, limit=2048):
+        """Private GUI reader, including the exact per-frame processing epoch."""
+        return self._read_measurements(after, limit, history=True)
+
+    def _read_measurements(self, after, limit, *, history):
         with self.lock:
             first = self.samples[0]["sequence"] if self.samples else self.sequence + 1
-            rows = [copy.deepcopy(s) for s in self.samples if s["sequence"] > after][:limit]
+            start = max(0, after - first + 1)
+            # Cursor sequences are contiguous. Bound copying while holding the
+            # telemetry lock so slow GUI catch-up never copies the whole buffer.
+            rows = [copy.deepcopy(s) for s in islice(self.samples, start, start + limit)]
+            for row in rows:
+                epoch = row.pop("_history_epoch", 0)
+                if history:
+                    row["epoch"] = epoch
             return {
                 "measurements": rows,
                 "next_cursor": rows[-1]["sequence"] if rows else after,
@@ -150,6 +165,7 @@ class ApiCapture:
                         "trial_id": self.active_id,
                         "valid": measurement["angle_deg"] is not None,
                         "capture_state": capture.status.state,
+                        "_history_epoch": getattr(self.worker, "measurement_epoch", 0),
                         **measurement,
                     }
                 )

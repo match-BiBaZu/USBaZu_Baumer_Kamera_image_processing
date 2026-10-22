@@ -97,11 +97,12 @@ def test_switch_during_live_keeps_worker_controls_image_and_native_preferences(q
         QTest.mouseClick(window.language_button, Qt.MouseButton.LeftButton)
         assert window.language == "en"
         assert window.language_button.text() == "Deutsch"
-        assert window.connect_button.text() == "Connect camera"
-        assert window.processing_group.title() == "2 · Detection & reference"
-        assert window.tabs.tabText(1) == "Passage · slow motion"
+        assert window.connect_button.text() == "Connect"
+        assert window.processing_group.title() == "Detection & reference"
+        assert window.tabs.tabText(window.tabs.indexOf(window.review_page)) == "Review"
+        assert window.tabs.tabText(window.tabs.indexOf(window.capture_page)) == "Record passages"
         assert "background subtraction" in window.segmentation_label.text()
-        assert "ID gaps" in window.rate_label.text()
+        assert "ID gaps" in window.diagnostics_label.text()
         assert "Recording:" in window.state_label.text()
         assert "angle history" in window.trace.caption
         assert window.live_view.source.cacheKey() == image_key
@@ -131,7 +132,7 @@ def test_switch_during_live_keeps_worker_controls_image_and_native_preferences(q
         window = None
         reopened = MainWindow(tmp_path)
         assert reopened.language == "en"
-        assert reopened.connect_button.text() == "Connect camera"
+        assert reopened.connect_button.text() == "Connect"
         assert reopened.processing_config().zero_offset_deg == -2.63
         assert reopened.camera_mode.currentData() == "frame_trigger"
         assert reopened.line.currentText() == "Line2"

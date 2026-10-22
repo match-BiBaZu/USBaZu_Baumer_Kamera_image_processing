@@ -47,6 +47,7 @@ class PipelineWorker(QThread):
         self.stopping = threading.Event()
         self.camera_idle = threading.Event()
         self.camera_settings_updating = False
+        self.measurement_epoch = 0
         self.api_capture = ApiCapture(self)
 
     def camera_settings_available(self):
@@ -157,6 +158,7 @@ class PipelineWorker(QThread):
                         break
                     if name == "camera_settings":
                         if self.apply_camera_settings(camera, capture, value):
+                            self.measurement_epoch += 1
                             previous_id = None
                             frames = 0
                             fps = 0.0
@@ -193,10 +195,14 @@ class PipelineWorker(QThread):
                         self.message.emit("Messreferenz erst nach dem laufenden Durchlauf ändern.")
                         continue
                     if name == "config":
+                        if any(getattr(processor.config, key) != setting
+                               for key, setting in value.items()):
+                            self.measurement_epoch += 1
                         for key, setting in value.items():
                             setattr(processor.config, key, setting)
                     elif name == "background" and frame is not None:
                         processor.set_background(frame.image)
+                        self.measurement_epoch += 1
                         if not self.demo:
                             if not cv2.imwrite(str(background_path), frame.image):
                                 raise OSError("Hintergrund konnte nicht gespeichert werden.")
@@ -205,6 +211,7 @@ class PipelineWorker(QThread):
                         )
                     elif name == "clear_background":
                         processor.clear_background()
+                        self.measurement_epoch += 1
                         if background_path.exists() and not self.demo:
                             background_path.unlink()
                         self.message.emit(
@@ -212,6 +219,7 @@ class PipelineWorker(QThread):
                         )
                     elif name == "zero" and detection is not None:
                         if detection.axis_deg is not None and detection.angle_deg is not None:
+                            self.measurement_epoch += 1
                             processor.config.zero_offset_deg = (
                                 detection.axis_deg - processor.config.chute_angle_deg
                             )
@@ -330,6 +338,7 @@ class PipelineWorker(QThread):
                         "status": status,
                         "fps": fps,
                         "frame_id": frame.frame_id,
+                        "timestamp": frame.timestamp,
                         "frame_gaps": frame_gaps,
                         "last_clip": capture.last_clip_path,
                         "stale_seconds": 0.0,

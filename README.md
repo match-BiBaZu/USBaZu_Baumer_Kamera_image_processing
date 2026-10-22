@@ -57,6 +57,34 @@ wiederhergestellt. Andere Kameraeinstellungen (z. B. Trigger oder Kamerabetrieb)
 werden weiterhin beim Verbinden gesetzt. Nach einer Belichtungsänderung einen
 vorhandenen Hintergrund bei **leerer Rutsche** neu aufnehmen.
 
+## Drei Arbeitsbereiche
+
+Die Oberfläche trennt die Aufgaben in drei Reiter mit jeweils eigener Seitenleiste:
+
+| Reiter | Inhalt |
+| --- | --- |
+| **Live & Erkennung** | Livebild, Winkel, Qualität und durchsuchbare Bildhistorie; rechts Erkennung, Referenz und Kameraeinstellungen. |
+| **Durchläufe aufnehmen** | Aktuelles Kamerabild und aktueller Winkel, Startmodus, Aufnahmeaktionen, Speicherordner und Aufnahmestatus. |
+| **Auswertung** | Gespeicherte Durchläufe auswählen, Bilder und zugehörige Winkel prüfen, Zeitlupe sowie CSV- und Standbildexport. |
+
+**Verbinden**, **Trennen**, **Demo** und die Sprachumschaltung stehen auf allen
+Seiten oben bereit. Die Statuszeile unten zeigt den Aufnahmestatus auch dann,
+wenn gerade eine andere Seite geöffnet ist. **Protokoll & Details** blendet
+Meldungen, Frame-ID, Bildlücken und Verarbeitungsdauer ein.
+
+Auf der Live-Seite ist **Erkennung & Referenz** zunächst geöffnet. **Kamera**
+und **Weitere Erkennungseinstellungen** sind eingeklappt. Dort befinden sich
+unter anderem Belichtung, Bildrate, Triggerkonfiguration, Verarbeitungsauflösung
+und Randprüfung. Die Aufnahmeseite bietet ihre selten benötigten Parameter unter
+**Weitere Aufnahmeeinstellungen** an. Ein-/Ausklappen verändert keine Einstellungen;
+die Auswahl bleibt während der Sitzung erhalten.
+
+Eine historische Auswahl auf der Live-Seite beeinflusst die aktuelle Anzeige
+auf der Aufnahmeseite nicht. Beim Wechseln der Reiter laufen Messung, Historie
+und Aufzeichnung weiter. Nach dem Speichern bleibt die aktuelle Seite geöffnet;
+**In Auswertung öffnen** lädt den letzten gespeicherten Durchlauf gezielt.
+Eine bereits geöffnete Auswertung wird durch neue Aufnahmen nicht ersetzt.
+
 ## Erster Versuch mit liegendem Bauteil
 
 1. Kamera verbinden. Der Standardpfad lautet
@@ -103,7 +131,7 @@ Teilen wird kein gültiger Winkel ausgegeben. Die angezeigte Qualität ist ein g
 Heuristikmaß, keine kalibrierte Winkelunsicherheit.
 
 Aufnahme und Verarbeitung laufen in einem eigenen Thread. Die Oberfläche zeigt
-nur das jeweils neueste Bild mit maximal etwa 30 Hz; erfasste Bilder werden während
+nur das jeweils neueste Bild mit etwa 60 Hz (präziser 17-ms-Takt); erfasste Bilder werden während
 einer Aufzeichnung unabhängig davon verarbeitet und behalten. Vorschauauslassungen
 sind daher kein Aufnahmeverlust. Frame-ID-Lücken werden angezeigt und pro Clip
 gezählt, soweit die Kamera echte Frame-IDs liefert. Jeder gespeicherte Frame hat
@@ -114,6 +142,60 @@ Aufzeichnung Originalbilder behält. Für schnelle Bauteile kurze Belichtungszei
 und passende Beleuchtung verwenden. Kamera-FPS, USB-Transfer, Verarbeitung und
 Speicherbudget müssen gemeinsam ausreichen. Die GUI zeigt gemessene Abruf-FPS
 und Verarbeitungsdauer. Ein größerer FPS-Sollwert garantiert diesen Durchsatz nicht.
+
+## Winkelverlauf und Bildhistorie
+
+Unter dem Livebild sind die letzten **zehn Minuten Kameramesswerte** durchsuchbar.
+Mit dem horizontalen Scrollbalken oder dem Mausrad im Diagramm vor- und
+zurückblättern. **Sichtbarer Zeitraum** wählt einen Ausschnitt von 1, 5, 10, 30,
+60 oder 600 Sekunden. Nach dem Zurückscrollen bleibt der Ausschnitt stehen.
+
+Ein Klick im Diagramm rastet zum nächstgelegenen vorhandenen Vorschauframe ein und
+zeigt seinen Winkel sowie das damalige Vorschaubild im großen Bildbereich.
+**Historie** und die Zeit seit Verbindungsbeginn kennzeichnen diese Ansicht;
+Kamera, Messung und Aufzeichnung laufen weiter. **Live** zeigt sofort wieder
+das aktuelle Bild und lässt das Diagramm den neuesten Werten folgen. Die Auswahl
+von ROI oder Rutschenkante schaltet ebenfalls zuerst zurück zum Livebild.
+Fehlende Winkel werden als Lücken und als **Kein gültiger Winkel** angezeigt.
+
+Die Bildhistorie verwendet JPEG-Vorschaubilder (Qualität 85, längste Seite maximal
+960 Pixel) einschließlich der damals eingeschalteten Messmarkierungen. Ihre
+Speicherung und das Laden erfolgen im Hintergrund in einem temporären Ordner.
+Die Bilder sind auf zehn Minuten und zusätzlich **2 GiB** begrenzt. Bei erreichtem
+Speicherlimit, überlasteter Schreibwarteschlange oder Dateifehlern bleiben die
+Winkelwerte verfügbar; betroffene Bilder erscheinen als **nicht verfügbar**.
+Die Zeitangaben sind Host-Abrufzeiten, keine Belichtungszeitstempel. Es werden
+etwa 60 Vorschauframes pro Sekunde übernommen. Die Kurve verwendet unabhängig
+davon alle verarbeiteten Kameramesswerte; ausgelassene Vorschauframes bedeuten
+deshalb keinen Verlust von Kurvenwerten. Für Originalbilder die
+Durchlaufaufzeichnung verwenden.
+
+Die Kurve zeigt einen **fortlaufenden Achswinkel**: Übergänge von −90° nach +90°
+werden anhand der kürzesten Achswinkeldifferenz fortgeführt. Ein Flip kann so von
+0° nach −180° verlaufen. Große Winkelanzeige, API und CSV behalten den ursprünglichen
+Messwinkel von −90° bis +90°. Bei einer historischen Auswahl nennt die Kopfzeile
+zusätzlich den fortlaufenden Winkel desselben Vorschauframes, sofern zugeordnet.
+Die Fortführung ist eine Darstellung anhand zeitlicher Kontinuität und kein
+bestätigter Flipzähler; Messwerte werden weder gemittelt noch ergänzt.
+
+Ungültige Messwerte sind gelblich markiert; Daten-, Zeit- und Konfigurationslücken
+grau. Ein Tooltip nennt Originalwinkel, fortlaufenden Winkel und den vorhandenen
+Lückengrund: fehlender geeigneter Umriss, uneindeutige Achse, Randkontakt oder
+Datenunterbrechung. Bei ungültigen Werten, fehlenden Frame-IDs, Pufferüberlauf,
+mehr als 50 ms Abstand, einem genau um 90° uneindeutigen Schritt oder geänderter
+Messkonfiguration beginnt ein neuer Abschnitt beim nächsten gültigen Originalwinkel.
+Es wird keine Drehung über eine solche Unterbrechung hinweg angenommen.
+
+**Protokoll & Details** unterscheidet Messrate, Vorschaurate, Anteil gültiger Winkel,
+Kamera-ID-Lücken, Messpufferüberläufe und vorhandene Messwerte ohne Vorschauframe.
+Die Rate und Gültigkeit beziehen sich auf die letzte Sekunde; Überläufe und Werte
+ohne Vorschau werden seit Verbindungsbeginn gezählt. Bei langen Zeitfenstern
+behält die Zeichnung die tatsächlichen Minima und Maxima je Bildschirmspalte;
+die vollständigen Messpunkte bleiben im Historienpuffer.
+
+Nach dem Trennen bleibt die Historie betrachtbar. Eine neue Verbindung beginnt
+eine neue Historie; beim Verbindungswechsel und regulären Programmende werden
+die temporären Bilder entfernt.
 
 ## Lichtschranke und Aufzeichnung
 
