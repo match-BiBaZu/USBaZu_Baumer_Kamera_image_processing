@@ -46,6 +46,11 @@ Ein gespeichertes Ergebnis enthält `clip_path`, Manifest und vollständige
 die GUI läuft. Originalbilder bleiben im vorhandenen Aufnahmeordner. API und
 CaptureManager halten höchstens 256 externe Versuche pro Pipeline vor.
 
+Ein Wechsel des Kameraprofils in der GUI macht die bisherige externe Sitzung ungültig.
+Nach Verbinden der anderen Kamera muss der Client eine neue Sitzung anfordern und
+seinen Live-Messcursor zurücksetzen. Abgeschlossene Versuchsergebnisse bleiben über
+ihre bisherigen Kennungen abfragbar. Endpunkte und Antwortformate bleiben unverändert.
+
 `GET /measurements?after=0&limit=2048` liefert kleine Messdatensätze ohne Bilder:
 Sequenznummer, monotonen Host-Abrufzeitstempel, Frame-ID, Winkel, Qualitätsmaß,
 Gültigkeit, Randkontakt, Anwesenheit, Aufnahmezustand und Versuchskennung.

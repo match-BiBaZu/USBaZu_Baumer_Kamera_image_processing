@@ -17,11 +17,14 @@ from bibazu_vision.camera import BaumerCamera, CameraConfig, find_cti_paths  # n
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Baumer USB-Kamera prüfen und ein Bild speichern.")
+    parser = argparse.ArgumentParser(
+        description="Baumer USB/GigE-Kamera prüfen und ein Bild speichern."
+    )
     parser.add_argument(
         "--cti", help="GenTL-Producer (.cti); automatische Baumer USB-Suche wenn leer"
     )
     parser.add_argument("--serial")
+    parser.add_argument("--pixel-format", help="Temporäres Pixelformat, z. B. Mono8 für die VLXT")
     parser.add_argument("--exposure-us", type=float)
     parser.add_argument("--fps", type=float)
     parser.add_argument("--line", default="Line0")
@@ -37,6 +40,7 @@ def main() -> int:
         CameraConfig(
             cti_path=args.cti,
             serial=args.serial,
+            pixel_format=args.pixel_format,
             exposure_us=args.exposure_us,
             fps=args.fps,
             trigger_line=args.line,

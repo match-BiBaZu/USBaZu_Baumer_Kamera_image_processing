@@ -373,9 +373,20 @@ ENGLISH = {
     ),
     "Kamera-API: {url}": "Camera API: {url}",
     "Kamera-API konnte nicht starten: {error}": "Could not start camera API: {error}",
+    "Kameraprofil": "Camera profile",
+    "Kleine USB-Kamera (VCXU-02C)": "Small USB camera (VCXU-02C)",
+    "GenTL-Producer (.cti)": "GenTL producer (.cti)",
+    "Verbinde Baumer-Kamera …": "Connecting Baumer camera …",
+    "Verbunden: {camera}": "Connected: {camera}",
+    "Keine eindeutige Kamera gefunden (Seriennummer: {serial}). "
+    "CTI-Pfad, Anschluss und Seriennummer prüfen.": (
+        "Could not identify a unique camera (serial number: {serial}). "
+        "Check the CTI path, connection and serial number."
+    ),
+    "nicht angegeben": "not specified",
 }
 
-_HUMAN_FIELDS = {"error", "stale", "border", "supported", "state"}
+_HUMAN_FIELDS = {"error", "stale", "border", "supported", "state", "serial"}
 
 
 def translate(source: str, language: str, **values) -> str:

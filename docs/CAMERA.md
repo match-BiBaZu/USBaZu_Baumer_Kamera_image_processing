@@ -1,19 +1,72 @@
-# Baumer USB-Kamera
+# Baumer USB- und GigE-Kameras
 
 Der Adapter `src/bibazu_vision/camera.py` verwendet Harvesters/GenICam mit dem
-Baumer USB GenTL-Producer. `find_cti_paths()` bevorzugt USB gegenüber GigE.
-Ein üblicher Installationspfad des Producers lautet
-`C:\Program Files\Baumer Camera Explorer\bgapi2_usb.cti`.
+passenden Baumer GenTL-Producer. Die GUI wählt ihn über das Kameraprofil:
+`bgapi2_usb.cti` für die kleine VCXU-02C oder `bgapi2_gige.cti` für die
+VLXT-28M.I mit SN `700006383255`. Beide Dateien liegen auf diesem Rechner unter
+`C:\Program Files\Baumer Camera Explorer`. Ohne expliziten CTI-Pfad bevorzugt
+`find_cti_paths()` weiterhin USB; es wird nur der erste Producer geladen.
 
 ```powershell
 python scripts/probe_camera.py --line Line0
+# VLXT über GigE; Pixelformat beim Schließen wiederherstellen:
+python scripts/probe_camera.py --cti "C:\Program Files\Baumer Camera Explorer\bgapi2_gige.cti" --serial 700006383255 --pixel-format Mono8
 ```
 
 Die Probe speichert ein unverändertes Kamera-Frame in
 `.diagnostics/current_camera.png` und lesbare Gerätedaten in
 `.diagnostics/camera_diagnostics.json`. Auch fehlgeschlagene Verbindungen werden
 dort dokumentiert. Der Camera Explorer muss seine exklusive Verbindung freigeben,
-bevor ein zweites Programm auf die USB-Kamera zugreift.
+bevor ein zweites Programm auf die Kamera zugreift. Die Diagnose enthält unter
+`devices` alle gefundenen Geräte und unter `selected_device` Modell und Seriennummer
+des tatsächlich ausgewählten Geräts. Diese Identität wird auch in der GUI und in
+der Kameradiagnose gespeicherter Aufnahmen verwendet.
+
+`CameraConfig.pixel_format` ist optional und bleibt für die USB-Kamera leer.
+Das VLXT-Profil fordert `Mono8` an. Wie Belichtung und Trigger wird eine Änderung
+des Pixelformats beim Schließen oder nach fehlgeschlagenem Verbindungsaufbau
+wiederhergestellt. Es werden keine UserSets gespeichert.
+
+Die GUI speichert `settings.json` im Format `version: 2` mit `selected_camera`
+(`usb` oder `vlxt`) und `camera_profiles`. Alte flache Einstellungen werden beim
+Lesen ins USB-Profil übernommen; der erste normale Speichervorgang schreibt das neue
+Format atomar. Ein reiner Demolauf schreibt keine Kameraprofile. Sprache und Ausgabeordner
+bleiben global. Hintergrunddateien werden getrennt unter `data/camera` und
+`data/camera_vlxt_700006383255` verwaltet.
+
+Die neuen Profile sind automatisiert mit simulierten Kameras geprüft. Die
+Hardwareabnahme der VLXT erfordert einen realen Bildempfang, eine kurze Aufzeichnung,
+die Kontrolle der tatsächlich erreichten FPS/Frame-ID-Lücken und einen separaten
+Test des verwendeten Triggereingangs.
+
+### Hardwareprüfung VLXT am 05.11.2026
+
+Der direkte Zugriff über `bgapi2_gige.cti` hat die VLXT-28M.I mit SN `700006383255`
+erkannt und ein Mono8-Bild mit der vorhandenen Kameraauflösung **1920 × 1200**
+geliefert. Die Auflösung wurde nicht verändert. Mit 1.000 µs und 200 FPS Sollwert
+wurden zwölf Bilder aufgezeichnet und erfolgreich aus dem Aufnahmeordner geladen;
+das Manifest enthält die richtige Kameraidentität. Pixelformat, Auto-Modi und
+Bildratenkonfiguration wurden nach dem Schließen kontrolliert und waren wiederhergestellt.
+Auch die fertige GUI hat mit einem separaten Diagnoseprofil ein Livebild angezeigt,
+die richtige Seriennummer gemeldet und die Profilauswahl während der Verbindung gesperrt.
+Ein Screenshot liegt unter `.diagnostics/camera_profiles/gui_smoke/vlxt_gui.png`.
+
+Kurze Vergleichsläufe von jeweils etwa zwei Sekunden ergaben:
+
+| Verarbeitung | Empfangene Bilder/s | Frame-ID-Lücken im Lauf |
+| --- | ---: | ---: |
+| Nur Erfassung | 129,4 | 0 |
+| Volle Verarbeitungsauflösung | 47,9 | 121 |
+| Halbe Verarbeitungsauflösung | 111,7 | 19 |
+
+Dies sind Messwerte des aktuellen Aufbaus, keine zugesicherte Bildrate. Die
+Verarbeitungsauflösung beeinflusst die Erkennung; gespeicherte Kamerabilder behalten
+ihre Originalauflösung. Für höhere lückenlose Messraten müssen Erfassung und
+Verarbeitung gesondert abgestimmt werden. Die Diagnose liegt unter
+`.diagnostics/camera_profiles/vlxt` (`stream_check.json`, `rate_comparison.json`,
+Snapshot und Testaufnahme). Die kleine USB-Kamera wurde bei dieser Prüfung nicht
+gefunden. Reale Lichtschrankenimpulse konnten nicht geprüft werden; der Adapter hat
+für `Line0` einen Hardware-Zähler eingerichtet.
 
 ## Trigger-Modi
 

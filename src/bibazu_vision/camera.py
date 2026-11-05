@@ -24,6 +24,7 @@ class CameraConfig:
     trigger_line: str = "Line0"
     trigger_activation: str = "RisingEdge"
     input_monitor: str = "auto"
+    pixel_format: str | None = None
 
 
 @dataclass(slots=True)
@@ -355,11 +356,18 @@ class BaumerCamera:
             ]
             if len(matches) != 1:
                 raise RuntimeError(
-                    "Keine eindeutige USB-Kamera gefunden. CTI-Pfad und Seriennummer prüfen."
+                    "Keine eindeutige Kamera gefunden "
+                    f"(Seriennummer: {self.config.serial or 'nicht angegeben'}). "
+                    "CTI-Pfad, Anschluss und Seriennummer prüfen."
                 )
+            self.diagnostics["selected_device"] = {
+                "model": matches[0].model, "serial": matches[0].serial_number,
+            }
             self._acquirer = self._harvester.create(matches[0])
             self._nm = self._acquirer.remote_device.node_map
             self._inspect()
+            if self.config.pixel_format is not None:
+                self._set("PixelFormat", self.config.pixel_format)
             for saved in self._triggers:
                 self._nm.TriggerSelector.value = saved["selector"]
                 if _writable(_node(self._nm, "TriggerMode")):

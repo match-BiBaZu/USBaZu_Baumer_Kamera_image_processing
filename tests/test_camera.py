@@ -82,14 +82,17 @@ class FakeHarvester:
     def __init__(self, acquirer):
         self.acquirer = acquirer
         self.device_info_list = [SimpleNamespace(model="VCXU-test", serial_number="123")]
+        self.added_files = []
+        self.created_device = None
 
     def add_file(self, *args, **kwargs):
-        pass
+        self.added_files.append(args[0])
 
     def update(self):
         pass
 
     def create(self, device):
+        self.created_device = device
         return self.acquirer
 
     def reset(self):
@@ -105,6 +108,59 @@ def patches(acquirer):
             side_effect=lambda nm, name: getattr(nm, name, SimpleNamespace(choices=[])).choices,
         ),
     )
+
+
+@pytest.mark.parametrize("producer,serial", [("usb", "123"), ("gige", "700006383255")])
+def test_explicit_producer_and_serial_open_the_selected_device(producer, serial):
+    acquirer = FakeAcquirer()
+    p1, p2, p3 = patches(acquirer)
+    camera = BaumerCamera(CameraConfig(cti_path=f"bgapi2_{producer}.cti", serial=serial))
+    with p1 as factory, p2, p3:
+        harvester = factory.return_value
+        harvester.device_info_list = [
+            SimpleNamespace(model="VCXU-02C", serial_number="123"),
+            SimpleNamespace(model="VLXT-28M.I", serial_number="700006383255"),
+        ]
+        camera.open()
+        assert harvester.added_files == [f"bgapi2_{producer}.cti"]
+        assert harvester.created_device.serial_number == serial
+        assert camera.diagnostics["selected_device"] == {
+            "model": harvester.created_device.model, "serial": serial,
+        }
+        camera.close()
+
+
+def test_missing_selected_camera_does_not_open_another_device():
+    acquirer = FakeAcquirer()
+    p1, p2, p3 = patches(acquirer)
+    camera = BaumerCamera(CameraConfig(cti_path="bgapi2_gige.cti", serial="700006383255"))
+    with p1 as factory, p2, p3:
+        with pytest.raises(RuntimeError, match="Seriennummer: 700006383255"):
+            camera.open()
+        assert factory.return_value.created_device is None
+        assert not camera.is_open
+
+
+@pytest.mark.parametrize("fail_setup", [False, True])
+def test_requested_pixel_format_is_restored_after_close_or_setup_failure(fail_setup):
+    acquirer = FakeAcquirer()
+    acquirer.node_map.PixelFormat = Node("Mono12Packed", ["Mono8", "Mono12Packed"])
+    p1, p2, p3 = patches(acquirer)
+    camera = BaumerCamera(CameraConfig(
+        cti_path="bgapi2_gige.cti", pixel_format="Mono8",
+        mode="acquisition_trigger" if fail_setup else "live",
+    ))
+    with p1, p2, p3:
+        if fail_setup:
+            with pytest.raises(RuntimeError, match="AcquisitionStart"):
+                camera.open()
+        else:
+            camera.open()
+            assert acquirer.node_map.PixelFormat.value == "Mono8"
+            assert camera.diagnostics["actual"]["PixelFormat"] == "Mono8"
+            camera.close()
+        assert acquirer.node_map.PixelFormat.value == "Mono12Packed"
+        assert acquirer.destroyed
 
 
 def test_missing_acquisition_start_fails_and_restores_original_camera_state():

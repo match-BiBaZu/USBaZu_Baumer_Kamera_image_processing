@@ -51,6 +51,7 @@ from .history import PreviewArchive
 from .history_trace import AngleTrace
 from .i18n import translate, translate_message
 from .processing import ProcessingConfig, render_overlay
+from .profiles import CAMERA_LABELS, VLXT_PROFILE, camera_data_dir, migrate_settings
 from .recording import CaptureConfig, load_clip
 from .worker import PipelineWorker
 
@@ -179,13 +180,19 @@ class MainWindow(QMainWindow):
                 self.profile = json.loads(profile_path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 pass
-        preferred = language if language is not None else self.profile.get("language", "de")
+        self.settings = migrate_settings(self.profile)
+        self.camera_profiles = self.settings["camera_profiles"]
+        self.selected_camera = self.settings["selected_camera"]
+        self.profile = self.camera_profiles[self.selected_camera]
+        preferred = language if language is not None else self.settings["language"]
         self.language = preferred if preferred in {"de", "en"} else "de"
         self._text_bindings = {}
         self._log_sources = []
         self._last_note = None
         self._qt_translator = QTranslator(self)
         self.worker = None
+        self._connection_pending = False
+        self._demo_controls = False
         self.camera_settings_pending = False
         self.last_snapshot = None
         self.last_frame = None
@@ -204,6 +211,10 @@ class MainWindow(QMainWindow):
         self.recording_error_text = None
         self.build_ui()
         self._register_texts()
+        self.ui_text(
+            self.reference_label, "0°-Offset: {offset:.2f}°",
+            offset=self.profile["processing"]["zero_offset_deg"],
+        )
         self.set_language(self.language, persist=language is not None)
         self.timer = QTimer(self)
         self.timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -306,7 +317,7 @@ class MainWindow(QMainWindow):
             temporary = target.with_suffix(".tmp")
             temporary.write_text(json.dumps(profile, indent=2), encoding="utf-8")
             temporary.replace(target)
-            self.profile["language"] = self.language
+            self.settings["language"] = self.language
         except (OSError, ValueError) as exc:
             self.note(f"Sprache konnte nicht gespeichert werden: {exc}")
 
@@ -522,10 +533,17 @@ class MainWindow(QMainWindow):
     def build_camera_controls(self, panel_layout):
         self.camera_section = group = CollapsibleSection("Kamera")
         form = self.form(group.body)
+        self.camera_selector = QComboBox()
+        for camera_id, label in CAMERA_LABELS.items():
+            self.camera_selector.addItem(label, camera_id)
+        self.camera_selector.setCurrentIndex(self.camera_selector.findData(self.selected_camera))
+        self.camera_selector.currentIndexChanged.connect(self.change_camera_profile)
+        form.addRow("Kameraprofil", self.camera_selector)
         default_cti = r"C:\Program Files\Baumer Camera Explorer\bgapi2_usb.cti"
         self.cti = QLineEdit(self.profile.get("cti", default_cti))
-        form.addRow("USB GenTL (.cti)", self.cti)
-        form.addRow(self.button("CTI auswählen", self.choose_cti))
+        form.addRow("GenTL-Producer (.cti)", self.cti)
+        self.cti_button = self.button("CTI auswählen", self.choose_cti)
+        form.addRow(self.cti_button)
         self.serial = QLineEdit(self.profile.get("serial", ""))
         form.addRow("Seriennummer (optional)", self.serial)
         self.exposure = spin(self.profile.get("exposure", 1000), 10, 1000000, 0, " µs")
@@ -684,7 +702,7 @@ class MainWindow(QMainWindow):
         self.stop_button = self.button("Aufzeichnung beenden", lambda: self.command("disarm"))
         form.addRow(self.stop_button)
         self.output_path = QLineEdit(
-            self.profile.get("output_dir", str(self.data_dir / "camera" / "recordings"))
+            self.settings.get("output_dir", str(self.data_dir / "camera" / "recordings"))
         )
         form.addRow("Speicherordner", self.output_path)
         self.output_button = self.button("Speicherordner auswählen", self.choose_output)
@@ -773,6 +791,94 @@ class MainWindow(QMainWindow):
             ignore_border_touch=self.ignore_border_touch.isChecked(),
         )
 
+    def remember_camera_controls(self):
+        self.profile = {
+            "cti": self.cti.text(),
+            "serial": self.serial.text(),
+            "exposure": self.exposure.value(),
+            "fps": self.fps.value(),
+            "capture": asdict(self.capture_config()),
+            "camera": {
+                "mode": self.camera_mode.currentData(),
+                "trigger_line": self.line.currentText(),
+                "trigger_activation": self.edge.currentText(),
+            },
+            "processing": asdict(self.processing_config()),
+        }
+        self.camera_profiles[self.selected_camera] = self.profile
+
+    def load_camera_controls(self):
+        self.last_snapshot = None
+        self.profile = self.camera_profiles[self.selected_camera]
+        camera = self.profile["camera"]
+        processing = self.profile["processing"]
+        capture = self.profile["capture"]
+        values = [
+            (self.cti, self.profile["cti"]), (self.serial, self.profile["serial"]),
+            (self.exposure, self.profile["exposure"]), (self.fps, self.profile["fps"]),
+            (self.threshold, processing["threshold"]), (self.area, processing["min_area"]),
+            (self.chute_angle, processing["chute_angle_deg"]),
+            (self.quiet, capture["quiet_seconds"]), (self.max_duration, capture["max_seconds"]),
+            (self.memory, capture["max_memory_mb"]),
+            (self.motion_percent, capture["motion_threshold"] * 100),
+        ]
+        for widget, value in values:
+            with QSignalBlocker(widget):
+                if isinstance(widget, QLineEdit):
+                    widget.setText(value)
+                else:
+                    widget.setValue(value)
+        for widget, value in [
+            (self.camera_mode, camera["mode"]), (self.line, camera["trigger_line"]),
+            (self.edge, camera["trigger_activation"]), (self.method, processing["method"]),
+            (self.foreground, processing["foreground"]), (self.scale, processing["scale"]),
+            (self.start_mode, capture["start_mode"]),
+        ]:
+            with QSignalBlocker(widget):
+                index = widget.findData(value)
+                widget.setCurrentIndex(max(0, index if index >= 0 else widget.findText(value)))
+        with QSignalBlocker(self.ignore_border_touch):
+            self.ignore_border_touch.setChecked(processing["ignore_border_touch"])
+        self.ui_text(
+            self.reference_label, "0°-Offset: {offset:.2f}°",
+            offset=processing["zero_offset_deg"],
+        )
+
+    def change_camera_profile(self, *_):
+        selected = self.camera_selector.currentData()
+        if selected == self.selected_camera:
+            return
+        if self._connection_pending or (self.worker is not None and self.worker.isRunning()):
+            with QSignalBlocker(self.camera_selector):
+                self.camera_selector.setCurrentIndex(
+                    self.camera_selector.findData(self.selected_camera)
+                )
+            self.note("Bitte die laufende Kamera zuerst trennen.")
+            return
+        if self._demo_controls:
+            self._demo_controls = False
+            self.load_camera_controls()
+        if not self.save_profile():
+            with QSignalBlocker(self.camera_selector):
+                self.camera_selector.setCurrentIndex(
+                    self.camera_selector.findData(self.selected_camera)
+                )
+            return
+        self.control_api.lease.invalidate()
+        self.control_api.expire()
+        self.worker = None
+        self.selected_camera = selected
+        self.load_camera_controls()
+        self.reset_live_state()
+        self.ui_text(self.state_label, "Bereit · Kamera noch nicht verbunden")
+        self.ui_text(self.connection_label, "Nicht verbunden")
+        self.ui_text(self.capture_status, "Bereit · Kamera noch nicht verbunden")
+        self.save_profile()
+
+    def set_connection_controls(self, enabled):
+        for widget in (self.camera_selector, self.cti, self.serial, self.cti_button):
+            widget.setEnabled(enabled)
+
     def capture_config(self):
         return CaptureConfig(
             start_mode=self.start_mode.currentData(),
@@ -783,13 +889,16 @@ class MainWindow(QMainWindow):
         )
 
     def connect_camera(self, demo):
-        if self.worker is not None and self.worker.isRunning():
+        if self._connection_pending or (self.worker is not None and self.worker.isRunning()):
             self.note("Bitte die laufende Kamera zuerst trennen.")
             return
         if not demo and not self.output_path.text().strip():
             self.note("Bitte einen Speicherordner auswählen.")
             return
         if demo:
+            if not self._demo_controls:
+                self.remember_camera_controls()
+            self._demo_controls = True
             self.last_snapshot = None
             self.threshold.setValue(25)
             self.area.setValue(150)
@@ -798,25 +907,9 @@ class MainWindow(QMainWindow):
             self.foreground.setCurrentIndex(0)
             self.scale.setCurrentIndex(0)
             self.start_mode.setCurrentIndex(self.start_mode.findData("motion"))
-        elif self.worker is not None and self.worker.demo:
-            saved = self.profile.get("processing", {})
-            self.last_snapshot = None
-            self.threshold.setValue(saved.get("threshold", 25))
-            self.area.setValue(saved.get("min_area", 150))
-            self.chute_angle.setValue(saved.get("chute_angle_deg", 0))
-            self.method.setCurrentIndex(max(0, self.method.findData(saved.get("method", "obb"))))
-            self.foreground.setCurrentIndex(
-                max(0, self.foreground.findData(saved.get("foreground", "dark")))
-            )
-            self.scale.setCurrentIndex(max(0, self.scale.findData(saved.get("scale", 1.0))))
-            self.start_mode.setCurrentIndex(
-                max(
-                    0,
-                    self.start_mode.findData(
-                        self.profile.get("capture", {}).get("start_mode", "hardware")
-                    ),
-                )
-            )
+        elif self._demo_controls:
+            self._demo_controls = False
+            self.load_camera_controls()
         self.pipeline_error = None
         self.recording_error_text = None
         camera = CameraConfig(
@@ -827,6 +920,7 @@ class MainWindow(QMainWindow):
             mode=self.camera_mode.currentData(),
             trigger_line=self.line.currentText(),
             trigger_activation=self.edge.currentText(),
+            pixel_format="Mono8" if self.selected_camera == VLXT_PROFILE else None,
         )
         if not demo and camera.mode == "acquisition_trigger":
             self.start_mode.setCurrentIndex(self.start_mode.findData("hardware"))
@@ -834,7 +928,10 @@ class MainWindow(QMainWindow):
             camera,
             (ProcessingConfig(chute_angle_deg=2.86) if demo else self.processing_config()),
             self.capture_config(),
-            self.data_dir / ("demo" if demo else "camera"),
+            (
+                self.data_dir / "demo" if demo
+                else camera_data_dir(self.data_dir, self.selected_camera)
+            ),
             demo,
             output_dir=None if demo else Path(self.output_path.text()),
         )
@@ -852,8 +949,10 @@ class MainWindow(QMainWindow):
         self.disconnect_button.setEnabled(True)
         self.output_path.setEnabled(False)
         self.output_button.setEnabled(False)
+        self._connection_pending = True
+        self.set_connection_controls(False)
         self.ui_text(
-            self.state_label, "Verbinde Demo …" if demo else "Verbinde Baumer-USB-Kamera …"
+            self.state_label, "Verbinde Demo …" if demo else "Verbinde Baumer-Kamera …"
         )
         self.ui_text(self.connection_label, "Verbinde …")
         self.start_history()
@@ -865,12 +964,15 @@ class MainWindow(QMainWindow):
             if not self.drain_measurements():
                 break
         self.camera_settings_pending = False
+        self._connection_pending = False
+        self.set_connection_controls(True)
         self.apply_camera_button.setEnabled(False)
         self.connect_button.setEnabled(True)
         self.demo_button.setEnabled(True)
         self.disconnect_button.setEnabled(False)
         self.ui_text(self.connection_label, "Nicht verbunden")
         self.processing_group.setEnabled(True)
+        self.capture_group.setEnabled(True)
         self.output_path.setEnabled(True)
         self.output_button.setEnabled(True)
         if self.pipeline_error:
@@ -999,9 +1101,13 @@ class MainWindow(QMainWindow):
             self.history_archive.expire_before(cutoff)
         snapshot = self.worker.snapshot()
         if snapshot is not None or self.worker.camera_idle.is_set():
-            self.ui_text(
-                self.connection_label, "Demo verbunden" if self.worker.demo else "Kamera verbunden"
-            )
+            if self.worker.demo:
+                self.ui_text(self.connection_label, "Demo verbunden")
+            else:
+                self.ui_text(
+                    self.connection_label, "Verbunden: {camera}",
+                    camera=getattr(self.worker, "camera_identity", "Baumer"),
+                )
         if snapshot is None:
             return
         self.last_snapshot = snapshot
@@ -1160,9 +1266,14 @@ class MainWindow(QMainWindow):
         if self.last_saved is not None:
             self.open_clip(Path(self.last_saved))
 
-    def start_history(self):
+    def reset_live_state(self):
         if self.history_archive is not None:
             self.history_archive.stop()
+        self.history_archive = None
+        self.last_snapshot = None
+        self.last_frame = None
+        self.pipeline_error = None
+        self.recording_error_text = None
         self.history_selection = None
         self._last_preview_key = None
         self._preview_cache_key = None
@@ -1187,6 +1298,12 @@ class MainWindow(QMainWindow):
         self.live_view.mode = None
         self.live_view.first = None
         self.live_view.unsetCursor()
+        self.capture_view.mode = None
+        self.capture_view.first = None
+        self.capture_view.unsetCursor()
+
+    def start_history(self):
+        self.reset_live_state()
         self.history_archive = archive = PreviewArchive(self)
         self._history_archives.append(archive)
         archive.image_loaded.connect(
@@ -1430,34 +1547,33 @@ class MainWindow(QMainWindow):
                 self.note("Standbild konnte nicht gespeichert werden.")
 
     def save_profile(self):
-        if self.worker is not None and self.worker.demo:
-            return
+        if self._demo_controls:
+            return True
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
-            profile = {
-                "cti": self.cti.text(),
+            if (
+                self.worker is not None and not self.worker.demo
+                and not self.worker.isRunning()
+            ):
+                snapshot = self.worker.snapshot()
+                if snapshot is not None:
+                    self.last_snapshot = snapshot
+            self.remember_camera_controls()
+            self.settings = {
+                "version": 2,
+                "selected_camera": self.selected_camera,
+                "camera_profiles": self.camera_profiles,
                 "language": self.language,
-                "serial": self.serial.text(),
-                "exposure": self.exposure.value(),
-                "fps": self.fps.value(),
-                "capture": asdict(self.capture_config()),
                 "output_dir": self.output_path.text(),
-                "camera": {
-                    "mode": self.camera_mode.currentData(),
-                    "trigger_line": self.line.currentText(),
-                    "trigger_activation": self.edge.currentText(),
-                },
-                "processing": self.last_snapshot["config"]
-                if self.last_snapshot
-                else asdict(self.processing_config()),
             }
-            self.profile = profile
             target = self.data_dir / "settings.json"
             temporary = target.with_suffix(".tmp")
-            temporary.write_text(json.dumps(profile, indent=2), encoding="utf-8")
+            temporary.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
             temporary.replace(target)
+            return True
         except OSError as exc:
             self.note(f"Einstellungen konnten nicht gespeichert werden: {exc}")
+            return False
 
     def closeEvent(self, event):
         if hasattr(self, "control_api"):
@@ -1483,7 +1599,7 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="BiBaZu Baumer-USB Bildverarbeitung")
+    parser = argparse.ArgumentParser(description="BiBaZu Baumer USB/GigE Bildverarbeitung")
     parser.add_argument("--demo", action="store_true", help="Synthetischen Durchlauf starten")
     parser.add_argument("--connect", action="store_true", help="Kamera beim Start verbinden")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")

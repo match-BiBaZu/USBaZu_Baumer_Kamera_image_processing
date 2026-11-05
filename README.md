@@ -1,6 +1,6 @@
 # BiBaZu · Baumer-Kamera und Winkelmessung
 
-Desktop-GUI für eine Baumer USB3-Vision-Kamera: Livebild mit Kontur, orientiertem
+Desktop-GUI für Baumer USB3-Vision- und GigE-Kameras: Livebild mit Kontur, orientiertem
 Rechteck (OBB) und Hauptachse, Winkel gegenüber der Rutsche, verlustlose
 Durchlaufaufzeichnung, Einzelbildkontrolle, Zeitlupe und Messwerte als CSV.
 Es werden keine trainierten Modelle oder Trainingsdaten benötigt.
@@ -21,7 +21,7 @@ Mit `bibazu-vision --language en` bzw. `--language de` kann sie beim Start
 vorgegeben werden. Beschriftungen, Statusmeldungen, Log und Dialoge sind übersetzt;
 Messdateien und Kamera-Parameter verwenden weiterhin ihre ursprünglichen Werte.
 
-Für einen neuen Rechner Python 3.11+ und den **Baumer USB GenTL-Producer**
+Für einen neuen Rechner Python 3.11+ und die **Baumer USB/GigE GenTL-Producer**
 (64 Bit passend zu Python, beispielsweise mit Baumer Camera Explorer) installieren:
 
 ```powershell
@@ -44,6 +44,40 @@ Beim Verbinden werden Belichtung, Bildrate und Triggerkonfiguration nur temporä
 gesetzt und beim regulären Trennen wiederhergestellt. Es werden keine UserSets
 dauerhaft in der Kamera gespeichert. Ein Prozessabbruch kann die Wiederherstellung
 verhindern; dann die gewünschten Einstellungen im Explorer erneut setzen.
+
+## Kamera auswählen und wechseln
+
+Unter **Live & Erkennung → Kamera → Kameraprofil** stehen zwei Kameras bereit:
+
+| Profil | GenTL-Producer | Seriennummer |
+| --- | --- | --- |
+| Kleine USB-Kamera (VCXU-02C) | `bgapi2_usb.cti` | Bisheriger Wert; bei genau einer USB-Kamera optional |
+| VLXT-28M.I | `bgapi2_gige.cti` | `700006383255` |
+
+Beide Producer liegen auf diesem Rechner unter `C:\Program Files\Baumer Camera Explorer`.
+CTI-Pfad und Seriennummer bleiben manuell bearbeitbar, solange keine Kamera verbunden ist.
+Beim ersten Start nach der Erweiterung ist die VLXT vorausgewählt; danach wird die letzte
+Auswahl gespeichert. Die Kamera wird erst mit **Verbinden** geöffnet.
+
+Zum Wechseln **Trennen** wählen, das Ende der Speicherung abwarten, das andere Profil
+auswählen und **Verbinden** wählen. Während Verbindung und Trennung sind Profil und
+Verbindungsfelder gesperrt. Eine fehlende Zielkamera wird gemeldet.
+
+Belichtung, FPS, Trigger, Erkennung, Messbereich, Rutschenwinkel, Nullpunkt und
+Aufnahmeeinstellungen werden je Profil gespeichert. Sprache und Ausgabeordner gelten
+für beide Profile. Die bisherigen Einstellungen werden automatisch ins USB-Profil
+übernommen. Dessen Hintergrund bleibt unter `data/camera/background.png`; die VLXT
+verwendet `data/camera_vlxt_700006383255/background.png`. Alte Durchläufe bleiben erreichbar.
+Profilwechsel setzen Livebild und Bild-/Messhistorie zurück; eine geöffnete Auswertung
+bleibt erhalten. Im Demo-Modus werden die Kameraprofile nicht überschrieben.
+
+Die VLXT startet mit **1.000 µs, 200 FPS Sollwert und Livebetrieb**. Ihr Pixelformat wird
+temporär auf `Mono8` gesetzt und beim Trennen wiederhergestellt. Hintergrund, Messbereich
+und Nullreferenz für diese Kamera neu einrichten. Die tatsächlich erreichte Bildrate
+hängt von Netzwerkanbindung, Kameraeinstellungen und Verarbeitung ab; 200 FPS sind
+ein Sollwert. Vor dem ersten Verbinden die VLXT im Camera Explorer auf Erreichbarkeit
+prüfen und dort anschließend freigeben. Triggereingang und Verkabelung für die VLXT
+gesondert prüfen.
 
 **Belichtung und Bildrate ohne Trennen ändern:** Bei verbundener Kamera die
 Belichtungszeit und/oder gewünschte Bildrate bearbeiten und **Kameraeinstellungen
@@ -87,8 +121,7 @@ Eine bereits geöffnete Auswertung wird durch neue Aufnahmen nicht ersetzt.
 
 ## Erster Versuch mit liegendem Bauteil
 
-1. Kamera verbinden. Der Standardpfad lautet
-   `C:\Program Files\Baumer Camera Explorer\bgapi2_usb.cti`.
+1. Unter **Kamera → Kameraprofil** die gewünschte Kamera auswählen und verbinden.
 2. Einen Messbereich wählen: zwei gegenüberliegende Ecken im Livebild anklicken.
    Nur die tatsächlich durchfahrene Rutsche einschließen; Randstrukturen auslassen.
 3. Das Bauteil kurz entfernen und **Leere Rutsche als Hintergrund aufnehmen**
@@ -241,7 +274,8 @@ separaten Writer gespeichert. Währenddessen bleiben Erfassung und Vorschau akti
 
 ## Daten und Kontrolle
 
-`data/camera` und `data/demo` sind getrennt. Einstellungen und Hintergrund bleiben
+`data/camera`, `data/camera_vlxt_700006383255` und `data/demo` sind getrennt.
+Einstellungen und Hintergrund bleiben
 lokal und sind von Git ausgeschlossen. Ein Durchlauf-Ordner enthält ein Manifest,
 Originalbilder als `.npy` und eine CSV mit Zeitstempeln, Frame-IDs und Winkeln.
 Im Manifest stehen Endgrund, Abbrüche, fehlende Frames, Aufnahmeeinstellungen,

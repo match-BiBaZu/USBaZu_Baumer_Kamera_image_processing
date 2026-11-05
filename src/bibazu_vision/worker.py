@@ -48,6 +48,7 @@ class PipelineWorker(QThread):
         self.camera_idle = threading.Event()
         self.camera_settings_updating = False
         self.measurement_epoch = 0
+        self.camera_identity = "Baumer"
         self.api_capture = ApiCapture(self)
 
     def camera_settings_available(self):
@@ -122,16 +123,14 @@ class PipelineWorker(QThread):
                 DemoCamera(self.camera_config) if self.demo else BaumerCamera(self.camera_config)
             )
             camera.open()
+            selected = camera.diagnostics.get("selected_device", {})
+            model = selected.get("model", camera.diagnostics.get("model", "Baumer"))
+            serial = selected.get("serial")
+            self.camera_identity = f"{model} · SN {serial}" if serial else model
             if capture.status.state == "idle":
                 self.camera_idle.set()
-            devices = camera.diagnostics.get("devices", [])
-            model = (
-                devices[0].get("model", "Baumer")
-                if devices
-                else camera.diagnostics.get("model", "Baumer")
-            )
             monitor = camera.diagnostics.get("hardware_trigger_monitor", "Demo")
-            self.message.emit(f"Verbunden: {model} · Triggersignal: {monitor}")
+            self.message.emit(f"Verbunden: {self.camera_identity} · Triggersignal: {monitor}")
             for warning in camera.diagnostics.get("warnings", []):
                 self.message.emit(warning)
             frame = None

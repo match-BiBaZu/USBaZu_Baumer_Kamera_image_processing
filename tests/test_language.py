@@ -69,6 +69,7 @@ def test_switch_during_live_keeps_worker_controls_image_and_native_preferences(q
         },
         "background_pending": True,
     }
+    native = {"selected_camera": "usb", "camera_profiles": {"usb": native}}
     profile_path = tmp_path / "settings.json"
     profile_path.write_text(json.dumps(native), encoding="utf-8")
     window = MainWindow(tmp_path)

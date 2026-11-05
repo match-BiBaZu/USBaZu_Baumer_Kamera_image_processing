@@ -303,7 +303,12 @@ def test_native_profile_does_not_hide_demo_and_is_preserved_on_close(qt_app, tmp
         "foreground": "light",
         "scale": 0.5,
     }
-    profile = {"processing": native_processing, "capture": {"start_mode": "hardware"}}
+    profile = {
+        "selected_camera": "usb",
+        "camera_profiles": {
+            "usb": {"processing": native_processing, "capture": {"start_mode": "hardware"}},
+        },
+    }
     stored_profile = json.dumps(profile, indent=2) + "\n"
     profile_path = tmp_path / "settings.json"
     profile_path.write_text(stored_profile, encoding="utf-8")
