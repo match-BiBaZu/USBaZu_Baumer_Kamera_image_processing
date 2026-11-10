@@ -112,12 +112,11 @@ class PipelineWorker(QThread):
             self.data_dir.mkdir(parents=True, exist_ok=True)
             processor = FrameProcessor(self.processing_config)
             background_path = self.data_dir / "background.png"
+            pending_background = None
             if self.demo:
                 processor.set_background(DemoCamera.background())
             elif background_path.exists():
-                image = cv2.imread(str(background_path), cv2.IMREAD_UNCHANGED)
-                if image is not None:
-                    processor.set_background(image)
+                pending_background = cv2.imread(str(background_path), cv2.IMREAD_UNCHANGED)
             capture = CaptureManager(self.capture_config, self.output_dir)
             camera = (
                 DemoCamera(self.camera_config) if self.demo else BaumerCamera(self.camera_config)
@@ -209,6 +208,7 @@ class PipelineWorker(QThread):
                             "Hintergrund aufgenommen. Nur bei leerer Rutsche verwenden."
                         )
                     elif name == "clear_background":
+                        pending_background = None
                         processor.clear_background()
                         self.measurement_epoch += 1
                         if background_path.exists() and not self.demo:
@@ -292,6 +292,22 @@ class PipelineWorker(QThread):
                             }
                     continue
                 frame = current
+                # The camera may use a different resolution than on its last
+                # connection. Keep live acquisition available so the user can
+                # capture a new empty-chute reference instead of disconnecting.
+                if pending_background is not None:
+                    background_height, background_width = pending_background.shape[:2]
+                    height, width = frame.image.shape[:2]
+                    if (background_height, background_width) == (height, width):
+                        processor.set_background(pending_background)
+                    else:
+                        self.message.emit(
+                            f"Gespeicherter Hintergrund ({background_width}×{background_height}) "
+                            f"passt nicht zum Kamerabild ({width}×{height}) und wird ignoriert. "
+                            "Livebild ohne Hintergrundabzug; bei leerer Rutsche "
+                            "einen neuen Hintergrund aufnehmen."
+                        )
+                    pending_background = None
                 if previous_id is not None and frame.frame_id > previous_id + 1:
                     frame_gaps += frame.frame_id - previous_id - 1
                 previous_id = frame.frame_id

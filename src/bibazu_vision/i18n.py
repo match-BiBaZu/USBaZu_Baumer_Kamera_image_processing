@@ -287,6 +287,17 @@ ENGLISH = {
         "Change the measurement reference after the current passage."
     ),
     "Hintergrund konnte nicht gespeichert werden.": "Could not save background.",
+    (
+        "Gespeicherter Hintergrund ({background_width}×{background_height}) "
+        "passt nicht zum Kamerabild ({width}×{height}) und wird ignoriert. "
+        "Livebild ohne Hintergrundabzug; bei leerer Rutsche "
+        "einen neuen Hintergrund aufnehmen."
+    ): (
+        "Saved background ({background_width}×{background_height}) "
+        "does not match the camera image ({width}×{height}) and is ignored. "
+        "Live preview without background subtraction; capture a new background "
+        "with the chute empty."
+    ),
     "Hintergrund aufgenommen. Nur bei leerer Rutsche verwenden.": (
         "Background captured. Only use this with an empty chute."
     ),

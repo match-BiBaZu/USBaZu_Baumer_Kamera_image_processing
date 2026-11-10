@@ -10,6 +10,7 @@ from dataclasses import asdict
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import cv2
 import numpy as np
 import pytest
 from PyQt6.QtTest import QTest
@@ -99,7 +100,10 @@ def worker_harness(qt_app, tmp_path, monkeypatch):
 
     monkeypatch.setattr(worker_module, "BaumerCamera", camera_factory)
 
-    def start(*, camera_mode="acquisition_trigger", commands=("arm",), **capture_values):
+    def start(
+        *, camera_mode="acquisition_trigger", commands=("arm",),
+        initial_background=None, **capture_values,
+    ):
         options = {
             "start_mode": "hardware",
             "pre_roll_seconds": 0,
@@ -118,6 +122,9 @@ def worker_harness(qt_app, tmp_path, monkeypatch):
         failures, messages = [], []
         worker.failed.connect(failures.append)
         worker.message.connect(messages.append)
+        if initial_background is not None:
+            worker.data_dir.mkdir(parents=True)
+            assert cv2.imwrite(str(worker.data_dir / "background.png"), initial_background)
         workers.append(worker)
         for command in commands:
             worker.command(command)
@@ -146,6 +153,55 @@ def completed_clip(application, worker):
         description="asynchronous recording completion",
     )
     return load_clip(worker.snapshot()["last_clip"])
+
+
+@pytest.mark.parametrize("shape", [(32, 48), (64, 48), (32, 96), (64, 96), (64, 96, 3)])
+def test_saved_background_is_checked_against_first_frame_and_can_be_recaptured(
+    qt_app, worker_harness, shape,
+):
+    background = np.full(shape, 185, np.uint8)
+    worker, camera, failures, messages = worker_harness(
+        camera_mode="live", commands=(), initial_background=background,
+    )
+    path = worker.data_dir / "background.png"
+    saved_bytes = path.read_bytes()
+    matches = shape[:2] == (64, 96)
+    camera.send_frame()
+    wait_for(qt_app, lambda: worker.snapshot() is not None)
+    assert worker.isRunning()
+    assert worker.snapshot()["has_background"] == matches
+    assert path.read_bytes() == saved_bytes
+    if matches:
+        # An equal-sized color background is compatible with a monochrome frame.
+        assert worker.snapshot()["detection"].area > 0
+        assert not any("wird ignoriert" in message for message in messages)
+    else:
+        wait_for(qt_app, lambda: any("wird ignoriert" in message for message in messages))
+        warning = next(message for message in messages if "wird ignoriert" in message)
+        assert f"{shape[1]}×{shape[0]}" in warning
+        assert "96×64" in warning
+    camera.send_frame()
+    wait_for(qt_app, lambda: worker.snapshot()["frame_id"] == 2)
+    assert sum("wird ignoriert" in message for message in messages) == (0 if matches else 1)
+    worker.command("background")
+    wait_for(qt_app, lambda: any("Hintergrund aufgenommen" in message for message in messages))
+    camera.send_frame()
+    wait_for(qt_app, lambda: worker.snapshot()["frame_id"] == 3)
+    assert worker.snapshot()["has_background"]
+    assert cv2.imread(str(path), cv2.IMREAD_UNCHANGED).shape == (64, 96)
+    assert failures == []
+
+
+def test_background_cleared_before_first_frame_is_not_loaded_later(qt_app, worker_harness):
+    worker, camera, failures, messages = worker_harness(
+        commands=("clear_background",), initial_background=np.full((64, 96), 185, np.uint8),
+    )
+    wait_for(qt_app, lambda: any("Hintergrund entfernt" in message for message in messages))
+    camera.send_frame()
+    wait_for(qt_app, lambda: worker.snapshot() is not None)
+    assert not worker.snapshot()["has_background"]
+    assert not (worker.data_dir / "background.png").exists()
+    assert failures == []
 
 
 @pytest.mark.parametrize("camera_mode,expected_rearms", [("acquisition_trigger", 1), ("live", 0)])

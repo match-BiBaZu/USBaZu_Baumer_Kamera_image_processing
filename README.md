@@ -71,6 +71,12 @@ verwendet `data/camera_vlxt_700006383255/background.png`. Alte Durchläufe bleib
 Profilwechsel setzen Livebild und Bild-/Messhistorie zurück; eine geöffnete Auswertung
 bleibt erhalten. Im Demo-Modus werden die Kameraprofile nicht überschrieben.
 
+Passt ein gespeicherter Hintergrund nicht zur aktuellen Kameraauflösung, wird er
+mit einem Hinweis im Protokoll übersprungen. Die Verbindung und das Livebild bleiben
+aktiv; zunächst gilt die absolute Helligkeitsschwelle. Bei leerer Rutsche einen neuen
+Hintergrund aufnehmen. Die bisherige Hintergrunddatei bleibt bis zum Ersetzen oder
+Entfernen erhalten.
+
 Die VLXT startet mit **1.000 µs, 200 FPS Sollwert und Livebetrieb**. Ihr Pixelformat wird
 temporär auf `Mono8` gesetzt und beim Trennen wiederhergestellt. Hintergrund, Messbereich
 und Nullreferenz für diese Kamera neu einrichten. Die tatsächlich erreichte Bildrate
