@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from collections import deque
 from dataclasses import dataclass
+from heapq import heappop, heappush
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -19,6 +20,69 @@ class HistorySample:
     timestamp: float
     frame_id: int | str
     angle: float | None
+
+
+class _PreviewFiles:
+    """Thread-owned disk index: look up by key and evict by timestamp.
+
+    A heap also handles preview requests that encode queued frames out of order.
+    Cleanup only visits removed files, never the entire ten-minute history.
+    Failed deletions remain accounted for and do not block other old files.
+    """
+
+    def __init__(self, max_bytes):
+        self.max_bytes = max_bytes
+        self.used_bytes = 0
+        self.files = {}
+        self._age = []
+
+    def add(self, sample, path, size):
+        previous = self.files.get(sample.key)
+        if previous is not None:
+            self.used_bytes -= previous[2]
+        self.files[sample.key] = (sample.timestamp, path, size)
+        self.used_bytes += size
+        heappush(self._age, (sample.timestamp, sample.key))
+
+    def _oldest(self):
+        while self._age:
+            timestamp, key = self._age[0]
+            entry = self.files.get(key)
+            if entry is not None and entry[0] == timestamp:
+                return timestamp, key
+            heappop(self._age)
+        return None
+
+    def prune(self, cutoff, *, required_bytes=0, limit=8):
+        """Bound disk work per pass; return whether age cleanup is still pending."""
+        failed = []
+        for _ in range(limit):
+            oldest = self._oldest()
+            if oldest is None:
+                break
+            timestamp, key = oldest
+            if timestamp >= cutoff and self.used_bytes + required_bytes <= self.max_bytes:
+                break
+            heappop(self._age)
+            _, path, size = self.files[key]
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                failed.append(oldest)
+                continue
+            del self.files[key]
+            self.used_bytes -= size
+        for oldest in failed:
+            heappush(self._age, oldest)
+        oldest = self._oldest()
+        return oldest is not None and oldest[0] < cutoff
+
+    def read(self, key, cutoff):
+        entry = self.files.get(key)
+        # Expired images are unavailable even while their disk cleanup is pending.
+        if entry is None or entry[0] < cutoff:
+            return None
+        return entry[1].read_bytes()
 
 
 class PreviewArchive(QThread):
@@ -67,7 +131,9 @@ class PreviewArchive(QThread):
 
     def expire_before(self, timestamp: float):
         with self._condition:
-            self._cutoff = max(self._cutoff, timestamp)
+            if timestamp <= self._cutoff:
+                return
+            self._cutoff = timestamp
             self._condition.notify()
 
     def stop(self):
@@ -91,9 +157,9 @@ class PreviewArchive(QThread):
         return data.tobytes()
 
     def run(self):
-        files = {}
-        used_bytes = 0
+        files = _PreviewFiles(self.max_bytes)
         applied_cutoff = float("-inf")
+        cleanup_pending = False
         temporary = None
         try:
             try:
@@ -110,7 +176,8 @@ class PreviewArchive(QThread):
                             or self._writes
                             or self._request is not None
                             or self._cutoff != applied_cutoff
-                        )
+                        ),
+                        timeout=0.05 if cleanup_pending else None,
                     )
                     if self._stopping:
                         self._writes.clear()
@@ -135,16 +202,16 @@ class PreviewArchive(QThread):
                     if job is not None:
                         self._queued_bytes -= job[1].nbytes
 
-                for key, (timestamp, path, size) in list(files.items()):
-                    if timestamp >= cutoff:
-                        continue
+                data = None
+                if job is not None and self.directory is not None:
                     try:
-                        path.unlink(missing_ok=True)
-                    except OSError:
-                        # Keep accounting for files that could not be deleted.
-                        continue
-                    del files[key]
-                    used_bytes -= size
+                        data = self.encode(job[1])
+                    except (OSError, cv2.error):
+                        pass
+                # A large expiry backlog must not monopolize this thread or
+                # flood the disk. Continue in small batches, even without frames.
+                required = len(data) if data is not None and len(data) <= self.max_bytes else 0
+                cleanup_pending = files.prune(cutoff, required_bytes=required)
                 applied_cutoff = cutoff
 
                 if job is not None:
@@ -153,17 +220,9 @@ class PreviewArchive(QThread):
                     if self.directory is not None:
                         path = self.directory / f"{sample.key}.jpg"
                         try:
-                            data = self.encode(image)
-                            while files and used_bytes + len(data) > self.max_bytes:
-                                key = min(files)
-                                _, oldest, size = files[key]
-                                oldest.unlink(missing_ok=True)
-                                del files[key]
-                                used_bytes -= size
-                            if len(data) <= self.max_bytes:
+                            if data is not None and files.used_bytes + len(data) <= self.max_bytes:
                                 path.write_bytes(data)
-                                files[sample.key] = (sample.timestamp, path, len(data))
-                                used_bytes += len(data)
+                                files.add(sample, path, len(data))
                                 saved = True
                         except (OSError, cv2.error):
                             # A failed write must not leave partial unaccounted files.
@@ -176,12 +235,13 @@ class PreviewArchive(QThread):
 
                 if request is not None:
                     image = None
-                    if request in files:
-                        try:
-                            data = np.frombuffer(files[request][1].read_bytes(), dtype=np.uint8)
+                    try:
+                        encoded = files.read(request, cutoff)
+                        if encoded is not None:
+                            data = np.frombuffer(encoded, dtype=np.uint8)
                             image = cv2.imdecode(data, cv2.IMREAD_COLOR)
-                        except (OSError, cv2.error):
-                            pass
+                    except (OSError, cv2.error):
+                        pass
                     self.image_loaded.emit(request, image)
         finally:
             if temporary is not None:

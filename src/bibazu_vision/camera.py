@@ -25,6 +25,8 @@ class CameraConfig:
     trigger_activation: str = "RisingEdge"
     input_monitor: str = "auto"
     pixel_format: str | None = None
+    crop_top: int = 0
+    crop_bottom: int = 0
 
 
 @dataclass(slots=True)
@@ -148,6 +150,9 @@ class BaumerCamera:
         self._acquirer: Any = None
         self._nm: Any = None
         self._restore: list[tuple[str, Any]] = []
+        self._roi_restore: tuple[int, int] | None = None
+        self._auto_roi_restore: list[tuple[str, dict[str, Any]]] = []
+        self._auto_roi_selector: str | None = None
         self._triggers: list[dict[str, Any]] = []
         self._sequence = 0
         self._first_acquisition_frame = True
@@ -182,6 +187,8 @@ class BaumerCamera:
             "DeviceSerialNumber",
             "Width",
             "Height",
+            "OffsetX",
+            "OffsetY",
             "PixelFormat",
             "ExposureTime",
             "ExposureTimeAbs",
@@ -233,7 +240,7 @@ class BaumerCamera:
                 rollback.append((name, old))
             return self._set(name, value, required=required)
 
-        if exposure_us is not None:
+        if exposure_us is not None or self.config.crop_top or self.config.crop_bottom:
             set_value("ExposureAuto", "Off", required=False)
             # Preserve gain/color coefficients while fixing image brightness.
             for name in ("GainAuto", "BalanceWhiteAuto", "ColorTransformationAuto"):
@@ -247,6 +254,7 @@ class BaumerCamera:
                     )
                     if warning not in self.diagnostics["warnings"]:
                         self.diagnostics["warnings"].append(warning)
+        if exposure_us is not None:
             name = (
                 "ExposureTime" if _node(self._nm, "ExposureTime") is not None
                 else "ExposureTimeAbs"
@@ -260,11 +268,136 @@ class BaumerCamera:
         self.diagnostics["actual"] = {
             name: _value(self._nm, name)
             for name in (
-                "Width", "Height", "PixelFormat", "ExposureTime", "ExposureTimeAbs",
+                "Width", "Height", "OffsetX", "OffsetY",
+                "PixelFormat", "ExposureTime", "ExposureTimeAbs",
                 "ExposureAuto", "GainAuto", "Gain", "BalanceWhiteAuto",
                 "ColorTransformationAuto", "AcquisitionFrameRateEnable",
                 "AcquisitionFrameRate", "ResultingFrameRate",
             )
+        }
+
+    def _snapshot_auto_regions(self) -> None:
+        """Image-size writes can silently shrink Baumer's automatic-control ROIs."""
+        selector = _node(self._nm, "AutoFeatureRegionSelector")
+        current = _value(self._nm, "AutoFeatureRegionSelector")
+        if current is None:
+            return
+        self._auto_roi_selector = current
+        entries = _entries(self._nm, "AutoFeatureRegionSelector") if _writable(selector) else []
+        try:
+            for entry in entries or [current]:
+                if selector.value != entry:
+                    selector.value = entry
+                values = {
+                    name: _value(self._nm, name)
+                    for name in (
+                        "AutoFeatureWidth", "AutoFeatureHeight", "AutoFeatureOffsetX",
+                        "AutoFeatureOffsetY", "AutoFeatureRegionMode",
+                    ) if _value(self._nm, name) is not None
+                }
+                self._auto_roi_restore.append((entry, values))
+        finally:
+            if selector.value != current:
+                selector.value = current
+
+    def _restore_auto_regions(self) -> None:
+        selector = _node(self._nm, "AutoFeatureRegionSelector")
+        try:
+            for entry, values in self._auto_roi_restore:
+                if selector.value != entry:
+                    selector.value = entry
+                # Normalize the origin before restoring the original dimensions.
+                for name, value in (
+                    ("AutoFeatureOffsetX", 0), ("AutoFeatureOffsetY", 0),
+                    *values.items(),
+                ):
+                    if name in values and _value(self._nm, name) != value:
+                        getattr(self._nm, name).value = value
+        except Exception as exc:
+            self.diagnostics["warnings"].append(
+                f"Automatik-Messbereich konnte nicht wiederhergestellt werden: {exc}"
+            )
+        finally:
+            if selector is not None and self._auto_roi_selector is not None:
+                try:
+                    if selector.value != self._auto_roi_selector:
+                        selector.value = self._auto_roi_selector
+                except Exception as exc:
+                    self.diagnostics["warnings"].append(
+                        f"AutoFeatureRegionSelector konnte nicht wiederhergestellt werden: {exc}"
+                    )
+            self._auto_roi_restore.clear()
+            self._auto_roi_selector = None
+
+    def _configure_vertical_roi(self) -> None:
+        top, bottom = self.config.crop_top, self.config.crop_bottom
+        if any(type(value) is not int or value < 0 for value in (top, bottom)):
+            raise ValueError(
+                "Kamera-Beschnitt muss aus nichtnegativen ganzen Pixelzahlen bestehen."
+            )
+        if not top and not bottom:
+            return
+        height = _value(self._nm, "Height")
+        offset = _value(self._nm, "OffsetY")
+        width = _value(self._nm, "Width")
+        if height is None or offset is None or width is None:
+            raise RuntimeError("Diese Kamera unterstützt keinen lesbaren vertikalen ROI.")
+        offset_node = _node(self._nm, "OffsetY")
+        try:
+            origin = int(offset_node.min)
+        except Exception:
+            origin = 0
+        full_height = _value(self._nm, "HeightMax")
+        if full_height is None:
+            try:
+                full_height = int(_node(self._nm, "Height").max) + int(offset) - origin
+            except Exception:
+                full_height = int(height)
+
+        def align(name, target, *, upwards=False):
+            node = _node(self._nm, name)
+            try:
+                minimum = int(node.min)
+            except Exception:
+                minimum = 1 if name == "Height" else 0
+            try:
+                step = max(1, int(node.inc))
+            except Exception:
+                step = 1
+            if target < minimum:
+                raise ValueError(
+                    "Kamera-Beschnitt lässt zu wenige Bildzeilen übrig "
+                    f"({name}: {target}, Minimum {minimum})."
+                )
+            steps = (target - minimum + (step - 1 if upwards else 0)) // step
+            return minimum + steps * step
+
+        actual_offset = align("OffsetY", origin + top, upwards=True)
+        target_height = origin + int(full_height) - bottom - actual_offset
+        actual_height = align("Height", target_height)
+        base = {
+            "width": int(width), "height": int(full_height),
+            "offset_x": int(_value(self._nm, "OffsetX", 0) or 0), "offset_y": origin,
+        }
+        self._snapshot_auto_regions()
+        self._roi_restore = (int(height), int(offset))
+        # Use the full sensor origin so reconnecting after a process crash does
+        # not cumulatively crop another strip from the already cropped image.
+        for name, value in (("OffsetY", origin), ("Height", actual_height),
+                            ("OffsetY", actual_offset)):
+            if _value(self._nm, name) == value:
+                continue
+            if not _writable(_node(self._nm, name)):
+                raise RuntimeError(f"Kameramerkmal {name} ist nicht schreibbar.")
+            getattr(self._nm, name).value = value
+        actual_height = int(_value(self._nm, "Height"))
+        actual_offset = int(_value(self._nm, "OffsetY"))
+        if actual_offset < origin or actual_offset + actual_height > origin + int(full_height):
+            raise RuntimeError("Kamera hat einen unerwarteten vertikalen ROI übernommen.")
+        self.diagnostics["vertical_roi"] = {
+            "base": base,
+            "top": actual_offset - origin,
+            "bottom": origin + int(full_height) - actual_offset - actual_height,
         }
 
     def _restart_after_settings(self) -> None:
@@ -335,6 +468,9 @@ class BaumerCamera:
             )
         self.diagnostics = {"warnings": [], "cti_path": paths[0], "mode": self.config.mode}
         self._restore.clear()
+        self._roi_restore = None
+        self._auto_roi_restore.clear()
+        self._auto_roi_selector = None
         self._triggers.clear()
         self._first_acquisition_frame = True
         self._last_line_state = None
@@ -381,6 +517,9 @@ class BaumerCamera:
                         "AcquisitionMode ist schreibgeschützt; vorhandener Modus wird beibehalten."
                     )
             self._configure_settings(self.config.exposure_us, self.config.fps)
+            # Active full-image auto exposure/gain ROIs can force Height.min to
+            # the full sensor height. Fix automatic controls before querying ROI limits.
+            self._configure_vertical_roi()
             if self.config.mode != "live":
                 requested = (
                     "AcquisitionStart"
@@ -642,7 +781,37 @@ class BaumerCamera:
                     self.diagnostics["warnings"].append(
                         f"Trigger-Einstellungen konnten nicht wiederhergestellt werden: {exc}"
                     )
+            automatic_controls = {
+                "ExposureAuto", "GainAuto", "BalanceWhiteAuto", "ColorTransformationAuto",
+            }
+            deferred_automatic = []
             for name, value in reversed(self._restore):
+                if self._roi_restore is not None and name in automatic_controls:
+                    deferred_automatic.append((name, value))
+                    continue
+                try:
+                    if _writable(_node(self._nm, name)):
+                        getattr(self._nm, name).value = value
+                except Exception as exc:
+                    self.diagnostics["warnings"].append(
+                        f"{name} konnte nicht wiederhergestellt werden: {exc}"
+                    )
+            if self._roi_restore is not None:
+                height, offset = self._roi_restore
+                try:
+                    node = _node(self._nm, "OffsetY")
+                    origin = int(getattr(node, "min", 0))
+                    for name, value in (("OffsetY", origin), ("Height", height),
+                                        ("OffsetY", offset)):
+                        if _value(self._nm, name) != value:
+                            getattr(self._nm, name).value = value
+                except Exception as exc:
+                    self.diagnostics["warnings"].append(
+                        f"Kamera-Beschnitt konnte nicht wiederhergestellt werden: {exc}"
+                    )
+                self._roi_restore = None
+            self._restore_auto_regions()
+            for name, value in deferred_automatic:
                 try:
                     if _writable(_node(self._nm, name)):
                         getattr(self._nm, name).value = value

@@ -5,6 +5,7 @@ import math
 import os
 import threading
 import time
+from itertools import product
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -477,6 +478,71 @@ def test_roi_and_chute_selection_send_original_coordinates(qt_app, tmp_path, mon
         dispose(window, qt_app)
 
 
+def test_overlay_buttons_refresh_the_same_frame_without_changing_worker_measurements(
+    qt_app, tmp_path, monkeypatch,
+):
+    cameras = []
+
+    def factory(config):
+        camera = FakeAcquisitionCamera(config)
+        cameras.append(camera)
+        return camera
+
+    monkeypatch.setattr(worker_module, "BaumerCamera", factory)
+    window = MainWindow(tmp_path)
+    try:
+        window.threshold.setValue(100)
+        window.show()
+        window.connect_camera(False)
+        wait_for(qt_app, lambda: bool(cameras))
+        cameras[0].send_frame()
+        wait_for(qt_app, lambda: window.last_snapshot is not None)
+        window.timer.stop()
+        snapshot = window.last_snapshot
+        raw = snapshot["image"].copy()
+        mask = snapshot["detection"].get_mask().copy()
+        angle = snapshot["detection"].angle_deg
+        config = snapshot["config"].copy()
+        telemetry = window.worker.api_capture.measurements(0, 8192)
+        commands = []
+        monkeypatch.setattr(
+            window.worker, "command", lambda *args: commands.append(args),
+        )
+        previews = []
+        for flags in product((False, True), repeat=3):
+            for button, checked in zip(window.overlay_buttons, flags, strict=True):
+                if button.isChecked() != checked:
+                    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+            preview = window.preview_image(snapshot)
+            assert window.preview_image(snapshot) is preview
+            if any(flags):
+                assert preview.ndim == 3
+            else:
+                assert preview is snapshot["image"]
+            previews.append(preview.copy())
+            assert window.live_view.source is not None
+        # Every combination produces a different view of the same camera frame.
+        for index, preview in enumerate(previews):
+            assert all(not np.array_equal(preview, other) for other in previews[:index])
+        assert commands == []
+        assert window.worker.api_capture.measurements(0, 8192) == telemetry
+        np.testing.assert_array_equal(snapshot["image"], raw)
+        np.testing.assert_array_equal(snapshot["detection"].mask, mask)
+        assert snapshot["detection"].angle_deg == angle
+        assert snapshot["config"] == config
+        window.tabs.setCurrentWidget(window.capture_page)
+        assert window.capture_view.source == window.live_view.source
+        window.set_language("en", persist=False)
+        assert [button.text() for button in window.overlay_buttons] == [
+            "Contour", "OBB", "Measurement axis",
+        ]
+        assert all(button.isChecked() for button in window.overlay_buttons)
+        window.tabs.setCurrentWidget(window.live_page)
+        screenshot(window, "independent_overlay_buttons.png")
+    finally:
+        dispose(window, qt_app)
+
+
 def test_history_keeps_matching_image_live_data_language_and_connection_lifecycle(
     qt_app, tmp_path, monkeypatch
 ):
@@ -490,7 +556,8 @@ def test_history_keeps_matching_image_live_data_language_and_connection_lifecycl
     monkeypatch.setattr(worker_module, "BaumerCamera", factory)
     window = MainWindow(tmp_path)
     try:
-        window.overlay_check.setChecked(False)
+        for button in window.overlay_buttons:
+            button.setChecked(False)
         window.connect_camera(False)
         wait_for(qt_app, lambda: bool(cameras))
         camera = cameras[0]
@@ -511,7 +578,7 @@ def test_history_keeps_matching_image_live_data_language_and_connection_lifecycl
         selected_pixels = window.live_view.source
         assert selected_pixels.pixelColor(25, 30).red() == pytest.approx(30, abs=12)
         assert window.history_selection == sample
-        assert not window.overlay_check.isEnabled()
+        assert all(not button.isEnabled() for button in window.overlay_buttons)
         window.history_image_loaded(
             window.history_archive, sample.key + 1, np.zeros((10, 10, 3), np.uint8)
         )
@@ -534,14 +601,13 @@ def test_history_keeps_matching_image_live_data_language_and_connection_lifecycl
         window.select_image("roi")
         assert window.history_selection is None
         assert window.trace.follow_live
-        assert window.overlay_check.isEnabled()
+        assert all(button.isEnabled() for button in window.overlay_buttons)
         assert window.live_view.mode == "roi"
         assert window.live_view.source.pixelColor(25, 30).red() == 185
         assert window.live_view.source.width() == window.last_snapshot["image"].shape[1]
         window.trace.select_at(sample.timestamp - window.trace.origin)
         wait_for(qt_app, lambda: window.live_view.source is not None)
         old_archive = window.history_archive
-        old_directory = old_archive.directory
         worker = window.worker
         window.disconnect_camera()
         wait_for(qt_app, lambda: not worker.isRunning())
@@ -549,7 +615,7 @@ def test_history_keeps_matching_image_live_data_language_and_connection_lifecycl
         window.trace.select_at(sample.timestamp - window.trace.origin)
         wait_for(qt_app, lambda: window.live_view.source is not None)
         assert window.live_view.source.pixelColor(25, 30).red() == pytest.approx(30, abs=12)
-        (old_directory / f"{sample.key}.jpg").unlink()
+        old_archive.expire_before(sample.timestamp + 0.001)
         window.trace.select_at(sample.timestamp - window.trace.origin)
         wait_for(qt_app, lambda: "nicht verfügbar" in window.live_view.text())
         assert window.live_view.source is None
@@ -559,7 +625,7 @@ def test_history_keeps_matching_image_live_data_language_and_connection_lifecycl
         assert not window.trace.samples
         assert window.history_archive is not old_archive
         wait_for(qt_app, lambda: not old_archive.isRunning())
-        assert not old_directory.exists()
+        assert not old_archive.submit(sample, np.zeros((10, 10), np.uint8))
         # A delayed response from the previous connection must not replace live pixels.
         window.history_image_loaded(old_archive, sample.key, np.zeros((10, 10, 3), np.uint8))
         assert window.live_view.source is None
@@ -570,3 +636,85 @@ def test_history_keeps_matching_image_live_data_language_and_connection_lifecycl
         assert "Historie" not in window.angle_label.text()
     finally:
         dispose(window, qt_app)
+
+
+def test_clear_history_deletes_previews_skips_old_mailbox_and_keeps_camera_running(
+    qt_app, tmp_path, monkeypatch
+):
+    cameras = []
+
+    def factory(config):
+        camera = FakeAcquisitionCamera(config)
+        cameras.append(camera)
+        return camera
+
+    monkeypatch.setattr(worker_module, "BaumerCamera", factory)
+    window = MainWindow(tmp_path)
+    original_recording = tmp_path / "retained_original.npy"
+    original_recording.write_bytes(b"original recording")
+    final_archive = None
+    try:
+        window.show()
+        window.connect_camera(False)
+        wait_for(qt_app, lambda: bool(cameras))
+        camera = cameras[0]
+        camera.send_frame(x=20)
+        wait_for(qt_app, lambda: len(window.trace.samples) == 1)
+        sample = window.trace.samples[0]
+        window.trace.select_at(sample.timestamp - window.trace.origin)
+        wait_for(qt_app, lambda: window.live_view.source is not None)
+        old_archive = window.history_archive
+        old_directory = old_archive.directory
+        assert list(old_directory.glob("*.jpg"))
+        worker = window.worker
+        origin = window.trace.origin
+        window.timer.stop()
+        # Leave a measured frame in the mailbox that the GUI has not consumed.
+        camera.send_frame(x=45)
+        wait_for(qt_app, lambda: worker.snapshot()["frame_id"] == 2)
+        mailbox = worker.api_capture.measurements(0, 8192)
+        assert mailbox["latest_cursor"] > window.trace.measurements.cursor
+        commands = []
+        monkeypatch.setattr(window, "command", lambda *args: commands.append(args))
+        QTest.mouseClick(window.clear_history_button, Qt.MouseButton.LeftButton)
+        assert window.worker is worker and worker.isRunning()
+        assert commands == []
+        assert window.history_archive is not old_archive
+        assert window.history_selection is None and window.trace.follow_live
+        assert not window.trace.samples and not len(window.trace.measurements)
+        assert window.trace.origin == origin
+        assert window.trace.measurements.cursor == mailbox["latest_cursor"]
+        assert window.drain_measurements() == 0
+        assert worker.api_capture.measurements(0, 8192) == mailbox
+        wait_for(qt_app, lambda: not old_archive.isRunning())
+        assert not old_directory.exists()
+        camera.send_frame(x=55)
+        wait_for(qt_app, lambda: worker.snapshot()["frame_id"] == 3)
+        window.refresh_live()
+        assert len(window.trace.samples) == 1
+        assert window.trace.samples[0].frame_id == 3
+        assert window.trace.samples[0].key == sample.key
+        # A late result for the reused key from the old archive cannot replace it.
+        window.trace.select_at(window.trace.samples[0].timestamp - origin)
+        wait_for(qt_app, lambda: window.live_view.source is not None)
+        selected_pixels = window.live_view.source
+        window.history_image_loaded(old_archive, sample.key, np.zeros((5, 5, 3), np.uint8))
+        assert window.live_view.source is selected_pixels
+        window.set_language("en", persist=False)
+        assert window.clear_history_button.text() == "Clear history"
+        window.set_language("de", persist=False)
+        assert window.clear_history_button.text() == "History löschen"
+        window.disconnect_camera()
+        wait_for(qt_app, lambda: not worker.isRunning())
+        disconnected_archive = window.history_archive
+        disconnected_directory = disconnected_archive.directory
+        QTest.mouseClick(window.clear_history_button, Qt.MouseButton.LeftButton)
+        wait_for(qt_app, lambda: not disconnected_archive.isRunning())
+        assert not disconnected_directory.exists()
+        assert not window.trace.samples
+        assert original_recording.read_bytes() == b"original recording"
+        final_archive = window.history_archive
+        wait_for(qt_app, lambda: final_archive.directory is not None)
+    finally:
+        dispose(window, qt_app)
+    assert final_archive is not None and not final_archive.directory.exists()

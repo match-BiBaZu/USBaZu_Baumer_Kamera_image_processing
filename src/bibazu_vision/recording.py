@@ -61,6 +61,9 @@ class CaptureStatus:
     writer_pending: int
     error: str | None = None
     rejected_triggers: int = 0
+    timed_active: bool = False
+    recorded_frames: int = 0
+    remaining_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -111,7 +114,7 @@ class _Capture:
     created_utc: str
     capture_config: dict[str, Any]
     metadata: dict[str, Any]
-    frames: list[_Frame] = field(default_factory=list)
+    frames: deque[_Frame] = field(default_factory=deque)
     motion_seen: bool = False
     last_motion: float | None = None
     last_present: bool = False
@@ -120,6 +123,9 @@ class _Capture:
     end: float | None = None
     reason: str = ""
     aborted: bool = False
+    duration_seconds: float | None = None
+    accepted_frames: int = 0
+    written_frames: int = 0
 
 
 def _get(value: Any, name: str, default: Any = None) -> Any:
@@ -232,11 +238,15 @@ class CaptureManager:
 
     def _status(self) -> CaptureStatus:
         if self._active is not None:
-            state = "moving" if self._active.motion_seen else "waiting"
+            state = (
+                "moving" if self._active.motion_seen or self._active.duration_seconds is not None
+                else "waiting"
+            )
         elif self._pending:
             state = "saving"
         else:
             state = "armed" if self._armed else "idle"
+        timed = self._active is not None and self._active.duration_seconds is not None
         return CaptureStatus(
             state,
             self._reason,
@@ -246,11 +256,43 @@ class CaptureManager:
             self._pending,
             self._error,
             self._rejected_triggers,
+            timed,
+            self._active.accepted_frames if timed else 0,
+            max(0.0, self._active.start + self._active.duration_seconds
+                - max(self._active.start, self._last_timestamp or self._active.start))
+            if timed else None,
         )
+
+    def start_timed(self, duration_seconds: float = 60, now: float | None = None) -> CaptureStatus:
+        """Stream originals immediately to disk, independently of passage end detection."""
+        if not math.isfinite(duration_seconds) or duration_seconds <= 0:
+            raise ValueError("duration_seconds must be positive and finite")
+        with self._saved:
+            self._ensure_open()
+            if self._armed or self._active is not None or self._pending:
+                raise RuntimeError("Zeitaufnahme nur bei beendeter, entschärfter Aufzeichnung.")
+            self._clear_pre_roll()
+            self._armed = True
+            self._single_shot = True
+            self._error = None
+            self._begin(self._clock(now), "timed")
+            capture = self._active
+            assert capture is not None
+            capture.duration_seconds = float(duration_seconds)
+            capture.capture_config.update(
+                recording_mode="timed", duration_seconds=float(duration_seconds)
+            )
+            # Reserve the writer while acquisition supplies frames through the
+            # bounded memory budget. The writer releases each image after saving.
+            self._pending += 1
+            self._jobs.put_nowait(capture)
+            return self._status()
 
     def arm(self, now: float | None = None, *, single_shot: bool = False) -> CaptureStatus:
         with self._lock:
             self._ensure_open()
+            if self._active is not None and self._active.duration_seconds is not None:
+                return self._status()
             self._armed = True
             self._single_shot = single_shot
             self._reason = None
@@ -337,14 +379,23 @@ class CaptureManager:
             self._trim_pre_roll(timestamp)
             if not self._armed:
                 return self._status()
-            if triggered and self.config.start_mode == "hardware":
+            timed = self._active is not None and self._active.duration_seconds is not None
+            if timed and timestamp >= self._active.start + self._active.duration_seconds:
+                self._check_end(timestamp)
+                return self._status()
+            if not timed and triggered and self.config.start_mode == "hardware":
                 self._begin(timestamp, "hardware")
-            elif self.config.start_mode == "motion" and moving and present and self._active is None:
+            elif (
+                not timed and self.config.start_mode == "motion" and moving
+                and present and self._active is None
+            ):
                 self._begin(timestamp, "motion")
             if self._active is not None:
                 if not self._append_frame(image, timestamp, frame_id, measurement, active=True):
                     self._active.dropped_frames += 1
                     self._dropped_frames += 1
+                    if timed:
+                        self._error = "Zeitaufnahme abgebrochen: Speicherpuffer voll."
                     self._finish("memory_limit", timestamp, aborted=True)
                     return self._status()
                 capture = self._active
@@ -406,8 +457,9 @@ class CaptureManager:
             datetime.now(timezone.utc).isoformat(),
             dict(vars(self.config)),
             json.loads(json.dumps(self.metadata, default=_scalar, allow_nan=False)),
-            frames=list(self._pre_roll),
+            frames=deque(self._pre_roll),
             pre_roll_truncated_frames=self._pre_roll_truncated,
+            accepted_frames=len(self._pre_roll),
         )
         self._pre_roll.clear()
         self._pre_roll_truncated = 0
@@ -441,6 +493,9 @@ class CaptureManager:
         if active:
             assert self._active is not None
             self._active.frames.append(frame)
+            self._active.accepted_frames += 1
+            if self._active.duration_seconds is not None:
+                self._saved.notify_all()
         else:
             self._pre_roll.append(frame)
         return True
@@ -462,7 +517,16 @@ class CaptureManager:
         capture = self._active
         if capture is None:
             return
-        if now - capture.start >= self.config.max_seconds:
+        if capture.duration_seconds is not None:
+            if now - capture.start >= capture.duration_seconds:
+                if capture.accepted_frames:
+                    self._finish("duration_elapsed", capture.start + capture.duration_seconds)
+                else:
+                    self._error = "Zeitaufnahme abgebrochen: Keine Kamerabilder empfangen."
+                    self._finish(
+                        "no_frames", capture.start + capture.duration_seconds, aborted=True
+                    )
+        elif now - capture.start >= self.config.max_seconds:
             self._finish("max_duration", now)
         elif not capture.motion_seen and now - capture.start >= self.config.wait_seconds:
             self._finish("no_motion_timeout", now)
@@ -477,13 +541,16 @@ class CaptureManager:
     def _finish(self, reason: str, stamp: float, *, aborted: bool = False) -> None:
         capture = self._active
         assert capture is not None
-        capture.end = stamp
+        capture.end = max(capture.start, stamp)
         capture.reason = reason
         capture.aborted = aborted
         self._active = None
         self._reason = reason
         if self._single_shot:
             self._armed = False
+        if capture.duration_seconds is not None:
+            self._saved.notify_all()
+            return
         self._pending += 1
         # _begin reserves a queue slot, including the currently executing writer.
         self._jobs.put_nowait(capture)
@@ -503,6 +570,10 @@ class CaptureManager:
             except Exception as exc:  # Surface filesystem errors to the camera worker.
                 error = f"{type(exc).__name__}: {exc}"
             with self._saved:
+                if error is not None and self._active is capture:
+                    # A streaming writer can fail while acquisition is active.
+                    self._armed = False
+                    self._finish("write_error", self._last_timestamp or capture.start, aborted=True)
                 if path is not None:
                     self.last_clip_path = path
                 if error is not None:
@@ -511,7 +582,7 @@ class CaptureManager:
                     ClipSaveResult(
                         path,
                         capture.reason,
-                        len(capture.frames),
+                        capture.accepted_frames,
                         capture.dropped_frames,
                         error,
                     )
@@ -537,7 +608,9 @@ class CaptureManager:
         rows = []
         frame_id_gaps = 0
         previous_id = None
-        for index, frame in enumerate(capture.frames):
+
+        def save_frame(index, frame):
+            nonlocal frame_id_gaps, previous_id
             filename = f"frames/{index:06d}.npy"
             with (temporary / filename).open("wb") as stream:
                 np.save(stream, frame.image, allow_pickle=False)
@@ -553,6 +626,24 @@ class CaptureManager:
                 if previous_id is not None and frame.frame_id > previous_id + 1:
                     frame_id_gaps += frame.frame_id - previous_id - 1
                 previous_id = frame.frame_id
+            capture.written_frames += 1
+
+        if capture.duration_seconds is None:
+            for index, frame in enumerate(capture.frames):
+                save_frame(index, frame)
+        else:
+            while True:
+                with self._saved:
+                    self._saved.wait_for(lambda: capture.frames or capture.end is not None)
+                    if not capture.frames:
+                        break
+                    frame = capture.frames.popleft()
+                try:
+                    save_frame(len(rows), frame)
+                finally:
+                    with self._saved:
+                        self._release(frame)
+                del frame
         manifest = {
             "schema_version": 1,
             "created_utc": capture.created_utc,
@@ -578,7 +669,16 @@ class CaptureManager:
             json.dump(manifest, stream, indent=2, allow_nan=False)
             stream.write("\n")
         _write_csv(temporary / "measurements.csv", rows)
-        os.replace(temporary, final)
+        # Windows can briefly lock a just-written directory (e.g. while scanning
+        # its files). Retry only permission/sharing failures, on the writer thread.
+        for attempt in range(5):
+            try:
+                os.replace(temporary, final)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05)
         return final
 
 

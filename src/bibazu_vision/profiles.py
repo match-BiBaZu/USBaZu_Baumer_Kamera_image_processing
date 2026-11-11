@@ -15,7 +15,9 @@ CAMERA_LABELS = {
     USB_PROFILE: "Kleine USB-Kamera (VCXU-02C)",
     VLXT_PROFILE: f"VLXT-28M.I · SN {VLXT_SERIAL}",
 }
-CAMERA_FIELDS = ("cti", "serial", "exposure", "fps", "camera", "processing", "capture")
+CAMERA_FIELDS = (
+    "cti", "serial", "exposure", "fps", "camera", "processing", "capture", "processing_geometry",
+)
 
 
 def default_profile(camera_id: str) -> dict:
@@ -29,6 +31,7 @@ def default_profile(camera_id: str) -> dict:
             "mode": "live", "trigger_line": "Line0", "trigger_activation": "RisingEdge",
         },
         "processing": asdict(ProcessingConfig()),
+        "processing_geometry": None,
         "capture": {
             "start_mode": "hardware", "quiet_seconds": 0.15, "max_seconds": 5,
             "max_memory_mb": 256, "motion_threshold": 0.001,
@@ -56,6 +59,7 @@ def migrate_settings(saved: dict) -> dict:
         "selected_camera": selected if selected in CAMERA_LABELS else VLXT_PROFILE,
         "camera_profiles": profiles,
         "language": saved.get("language", "de"),
+        "preview": deepcopy(saved.get("preview", {})),
         **({"output_dir": saved["output_dir"]} if "output_dir" in saved else {}),
     }
 

@@ -50,6 +50,7 @@ from .camera import CameraConfig
 from .history import PreviewArchive
 from .history_trace import AngleTrace
 from .i18n import translate, translate_message
+from .performance import configure_opencv_threads
 from .processing import ProcessingConfig, render_overlay
 from .profiles import CAMERA_LABELS, VLXT_PROFILE, camera_data_dir, migrate_settings
 from .recording import CaptureConfig, load_clip
@@ -182,6 +183,17 @@ class MainWindow(QMainWindow):
                 pass
         self.settings = migrate_settings(self.profile)
         self.camera_profiles = self.settings["camera_profiles"]
+        self.camera_roi_settings = {}
+        roi_path = self.data_dir / "camera_roi_settings.json"
+        if roi_path.exists():
+            try:
+                stored_roi = json.loads(roi_path.read_text(encoding="utf-8"))
+                if isinstance(stored_roi, dict):
+                    self.camera_roi_settings = {
+                        key: value for key, value in stored_roi.items() if isinstance(value, dict)
+                    }
+            except (OSError, ValueError):
+                pass
         self.selected_camera = self.settings["selected_camera"]
         self.profile = self.camera_profiles[self.selected_camera]
         preferred = language if language is not None else self.settings["language"]
@@ -202,6 +214,8 @@ class MainWindow(QMainWindow):
         self._last_preview_key = None
         self._preview_cache_key = None
         self._preview_cache_image = None
+        self._last_display_timestamp = None
+        self._last_archive_timestamp = None
         self.clip = None
         self.review_index = 0
         self.review_position = 0.0
@@ -329,6 +343,7 @@ class MainWindow(QMainWindow):
             QPushButton,QToolButton {background:#24354d;border:1px solid #425774;
                 border-radius:5px;padding:8px;}
             QPushButton:hover,QToolButton:hover {background:#334c6c;}
+            QPushButton#overlayToggle:checked {background:#0369a1;border-color:#38bdf8;}
             QPushButton:disabled,QToolButton:disabled {color:#64748b;}
             QLineEdit,QSpinBox,QDoubleSpinBox,QComboBox,QListWidget,QTextEdit {
                 background:#172338;border:1px solid #334155;border-radius:4px;padding:4px;}
@@ -386,7 +401,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.details_panel)
         self.details_panel.hide()
         self.tabs.currentChanged.connect(self.refresh_current_page)
-        self.overlay_check.toggled.connect(self.refresh_current_page)
+        for button in self.overlay_buttons:
+            button.toggled.connect(self.refresh_current_page)
 
     def toggle_details(self):
         self.details_panel.setVisible(self.details_button.isChecked())
@@ -442,14 +458,26 @@ class MainWindow(QMainWindow):
         view_heading.addWidget(self.history_status, 1)
         self.live_button = self.button("Live", self.return_to_live)
         view_heading.addWidget(self.live_button)
+        self.clear_history_button = self.button("History löschen", self.clear_history)
+        view_heading.addWidget(self.clear_history_button)
         live_layout.addLayout(view_heading)
         self.live_view = ImageView()
         self.live_view.setMinimumSize(320, 160)
         self.live_view.selected.connect(self.image_selection)
         live_layout.addWidget(self.live_view, 1)
-        self.overlay_check = QCheckBox("Kontur, OBB und Messachse anzeigen")
-        self.overlay_check.setChecked(True)
-        live_layout.addWidget(self.overlay_check)
+        overlay_controls = QHBoxLayout()
+        overlay_controls.addWidget(QLabel("Anzeigen:"))
+        self.contour_button = QPushButton("Kontur")
+        self.obb_button = QPushButton("OBB")
+        self.axis_button = QPushButton("Messachse")
+        self.overlay_buttons = (self.contour_button, self.obb_button, self.axis_button)
+        for button in self.overlay_buttons:
+            button.setObjectName("overlayToggle")
+            button.setCheckable(True)
+            button.setChecked(True)
+            overlay_controls.addWidget(button)
+        overlay_controls.addStretch()
+        live_layout.addLayout(overlay_controls)
         self.segmentation_label = QLabel("Segmentierung: noch kein Bild")
         self.segmentation_label.setWordWrap(True)
         live_layout.addWidget(self.segmentation_label)
@@ -471,6 +499,7 @@ class MainWindow(QMainWindow):
         live_layout.addWidget(self.trace)
         self.build_processing_controls(sidebar)
         self.build_camera_controls(sidebar)
+        self.build_preview_controls(sidebar)
         sidebar.addStretch()
         self.tabs.addTab(self.live_page, "Live & Erkennung")
 
@@ -496,6 +525,72 @@ class MainWindow(QMainWindow):
         self.build_capture_controls(sidebar)
         sidebar.addStretch()
         self.tabs.addTab(self.capture_page, "Durchläufe aufnehmen")
+
+    def build_preview_controls(self, panel_layout):
+        self.preview_section = CollapsibleSection("Vorschau & Bildhistorie")
+        form = self.form(self.preview_section.body)
+        saved = self.settings.get("preview", {})
+        self.preview_fps = QComboBox()
+        self.preview_fps.addItem("Aus", 0)
+        for fps in (5, 10, 15, 20, 30, 60):
+            self.preview_fps.addItem(f"{fps} FPS", fps)
+        self.preview_fps.setCurrentIndex(
+            max(0, self.preview_fps.findData(saved.get("live_fps", 60)))
+        )
+        form.addRow("Livebild anzeigen", self.preview_fps)
+        self.history_fps = QComboBox()
+        self.history_fps.addItem("Aus", -1)
+        for fps in (1, 5, 10, 20, 30, 60):
+            self.history_fps.addItem(f"{fps} FPS", fps)
+        self.history_fps.addItem("Alle verfügbaren Vorschaubilder", 0)
+        self.history_fps.setCurrentIndex(
+            max(0, self.history_fps.findData(saved.get("history_fps", 0)))
+        )
+        form.addRow("Bilder für Zeitleiste", self.history_fps)
+        self.gap_ms = QSpinBox()
+        self.gap_ms.setRange(10, 1000)
+        self.gap_ms.setSingleStep(10)
+        self.gap_ms.setSuffix(" ms")
+        self.gap_ms.setValue(saved.get("gap_ms", 100))
+        self.trace.max_gap_seconds = self.gap_ms.value() / 1000
+        form.addRow("Zeitlücke", self.gap_ms)
+        hint = QLabel(
+            "Diese Limits betreffen nur Anzeige und temporäre Vorschaubilder. "
+            "Winkelmesswerte und gestartete Originalaufnahmen behalten jedes erfasste Bild. "
+            "Für Flips die Originalaufnahme in der Auswertung prüfen. "
+            "Die Zeitgrenze gilt ab der nächsten Verbindung. "
+            "Fehlende Bild-IDs bleiben unabhängig von der Zeitgrenze markiert."
+        )
+        hint.setWordWrap(True)
+        form.addRow(hint)
+        for control in (self.preview_fps, self.history_fps):
+            control.currentIndexChanged.connect(self.preview_settings_changed)
+        self.gap_ms.valueChanged.connect(self.preview_settings_changed)
+        panel_layout.addWidget(self.preview_section)
+
+    def preview_settings(self):
+        return {
+            "live_fps": self.preview_fps.currentData(),
+            "history_fps": self.history_fps.currentData(),
+            "gap_ms": self.gap_ms.value(),
+        }
+
+    def preview_settings_changed(self, *_):
+        self._last_display_timestamp = None
+        self._last_archive_timestamp = None
+        self.trace.max_gap_seconds = self.gap_ms.value() / 1000
+        self.settings["preview"] = self.preview_settings()
+        # Persist only presentation preferences; live calibration belongs to the worker.
+        try:
+            target = self.data_dir / "settings.json"
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            stored = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
+            stored["preview"] = self.preview_settings()
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text(json.dumps(stored, indent=2), encoding="utf-8")
+            temporary.replace(target)
+        except (OSError, ValueError) as exc:
+            self.note(f"Vorschau-Einstellungen konnten nicht gespeichert werden: {exc}")
 
     def build_review_page(self):
         self.review_page, review_layout, panel_layout, self.review_sidebar = self.create_page()
@@ -575,6 +670,17 @@ class MainWindow(QMainWindow):
         self.edge.addItems(["RisingEdge", "FallingEdge"])
         self.edge.setCurrentText(camera_profile.get("trigger_activation", "RisingEdge"))
         form.addRow("Triggerflanke", self.edge)
+        roi = self.camera_roi_settings.get(self.selected_camera, {})
+        self.crop_top = QSpinBox()
+        self.crop_bottom = QSpinBox()
+        for control, key in ((self.crop_top, "crop_top"), (self.crop_bottom, "crop_bottom")):
+            control.setRange(0, 100000)
+            control.setSingleStep(4)
+            control.setSuffix(" px")
+            control.setValue(roi.get(key, 0))
+            control.valueChanged.connect(self.camera_crop_changed)
+        form.addRow("Kamera: oben abschneiden", self.crop_top)
+        form.addRow("Kamera: unten abschneiden", self.crop_bottom)
         hint = QLabel(
             "Belichtung / Bildrate beim Verbinden oder mit Anwenden setzen. "
             "Aufzeichnung vorher beenden. Andere Kameraeinstellungen benötigen erneutes "
@@ -583,6 +689,19 @@ class MainWindow(QMainWindow):
         hint.setWordWrap(True)
         form.addRow(hint)
         panel_layout.addWidget(group)
+
+    def camera_crop_changed(self, *_):
+        self.camera_roi_settings[self.selected_camera] = {
+            "crop_top": self.crop_top.value(), "crop_bottom": self.crop_bottom.value(),
+        }
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            target = self.data_dir / "camera_roi_settings.json"
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text(json.dumps(self.camera_roi_settings, indent=2), encoding="utf-8")
+            temporary.replace(target)
+        except OSError as exc:
+            self.note(f"Kamera-Beschnitt konnte nicht gespeichert werden: {exc}")
 
     def build_processing_controls(self, panel_layout):
         self.processing_group = group = CollapsibleSection("Erkennung & Referenz", True)
@@ -699,6 +818,16 @@ class MainWindow(QMainWindow):
         form.addRow(self.arm_button)
         self.trigger_button = self.button("Manuell auslösen", lambda: self.command("trigger"))
         form.addRow(self.trigger_button)
+        self.timed_button = self.button("1 Minute aufnehmen", self.start_timed_recording)
+        self.timed_button.setEnabled(False)
+        form.addRow(self.timed_button)
+        timed_hint = QLabel(
+            "Zeitaufnahme: 60 Sekunden Originalbilder und Winkel, auch ohne Bewegung. "
+            "Die Bilder werden laufend auf die Festplatte geschrieben. "
+            "Mit Aufzeichnung beenden jederzeit früher stoppen."
+        )
+        timed_hint.setWordWrap(True)
+        form.addRow(timed_hint)
         self.stop_button = self.button("Aufzeichnung beenden", lambda: self.command("disarm"))
         form.addRow(self.stop_button)
         self.output_path = QLineEdit(
@@ -804,12 +933,20 @@ class MainWindow(QMainWindow):
                 "trigger_activation": self.edge.currentText(),
             },
             "processing": asdict(self.processing_config()),
+            "processing_geometry": (
+                self.last_snapshot.get("camera_geometry") if self.last_snapshot
+                else self.profile.get("processing_geometry")
+            ),
         }
         self.camera_profiles[self.selected_camera] = self.profile
 
     def load_camera_controls(self):
         self.last_snapshot = None
         self.profile = self.camera_profiles[self.selected_camera]
+        roi = self.camera_roi_settings.get(self.selected_camera, {})
+        for control, key in ((self.crop_top, "crop_top"), (self.crop_bottom, "crop_bottom")):
+            with QSignalBlocker(control):
+                control.setValue(roi.get(key, 0))
         camera = self.profile["camera"]
         processing = self.profile["processing"]
         capture = self.profile["capture"]
@@ -876,7 +1013,10 @@ class MainWindow(QMainWindow):
         self.save_profile()
 
     def set_connection_controls(self, enabled):
-        for widget in (self.camera_selector, self.cti, self.serial, self.cti_button):
+        for widget in (
+            self.camera_selector, self.cti, self.serial, self.cti_button,
+            self.crop_top, self.crop_bottom, self.gap_ms,
+        ):
             widget.setEnabled(enabled)
 
     def capture_config(self):
@@ -887,6 +1027,13 @@ class MainWindow(QMainWindow):
             max_memory_mb=self.memory.value(),
             motion_threshold=self.motion_percent.value() / 100,
         )
+
+    def start_timed_recording(self):
+        if self.worker is None or not self.worker.isRunning():
+            self.note("Zuerst Kamera oder Demo verbinden.")
+            return
+        if self.worker.command("capture_config", asdict(self.capture_config())):
+            self.worker.command("timed_recording", 60.0)
 
     def connect_camera(self, demo):
         if self._connection_pending or (self.worker is not None and self.worker.isRunning()):
@@ -921,6 +1068,8 @@ class MainWindow(QMainWindow):
             trigger_line=self.line.currentText(),
             trigger_activation=self.edge.currentText(),
             pixel_format="Mono8" if self.selected_camera == VLXT_PROFILE else None,
+            crop_top=0 if demo else self.crop_top.value(),
+            crop_bottom=0 if demo else self.crop_bottom.value(),
         )
         if not demo and camera.mode == "acquisition_trigger":
             self.start_mode.setCurrentIndex(self.start_mode.findData("hardware"))
@@ -934,6 +1083,7 @@ class MainWindow(QMainWindow):
             ),
             demo,
             output_dir=None if demo else Path(self.output_path.text()),
+            processing_geometry=None if demo else self.profile.get("processing_geometry"),
         )
         self.worker.message.connect(self.note)
         self.worker.failed.connect(self.camera_error)
@@ -1094,6 +1244,7 @@ class MainWindow(QMainWindow):
     def refresh_live(self):
         self.refresh_camera_settings_button()
         if self.worker is None or not self.worker.isRunning():
+            self.timed_button.setEnabled(False)
             return
         cutoff = time.perf_counter() - 600
         self.trace.expire_before(cutoff)
@@ -1114,6 +1265,13 @@ class MainWindow(QMainWindow):
         self.drain_measurements()
         status = snapshot["status"]
         state = getattr(status, "state", "?")
+        self.timed_button.setEnabled(
+            state == "idle" and not self.worker.api_capture.busy()
+            and (self.worker.demo or self.camera_mode.currentData() == "live")
+        )
+        timed_active = getattr(status, "timed_active", False)
+        self.arm_button.setEnabled(not timed_active)
+        self.trigger_button.setEnabled(not timed_active)
         self.processing_group.setEnabled(
             state not in {"waiting", "moving"} and not self.worker.api_capture.busy()
         )
@@ -1148,6 +1306,15 @@ class MainWindow(QMainWindow):
             error=f" · {error}" if error else "",
             stale=stale,
         )
+        if getattr(status, "timed_active", False):
+            for label in (self.capture_status, self.state_label):
+                self.ui_text(
+                    label,
+                    "Zeitaufnahme · noch {seconds:.1f} s · {frames} Originalbilder{stale}",
+                    seconds=status.remaining_seconds,
+                    frames=status.recorded_frames,
+                    stale=stale,
+                )
         measured, previewed, valid = self.trace.rates(time.perf_counter())
         self.ui_text(
             self.diagnostics_label,
@@ -1192,16 +1359,33 @@ class MainWindow(QMainWindow):
         self.ui_text(
             self.reference_label, "0°-Offset: {offset:.2f}°", offset=config.zero_offset_deg
         )
-        image = self.preview_image(snapshot)
         page = self.tabs.currentWidget()
-        if page is self.live_page and self.history_selection is None:
-            self.live_view.set_image(image)
-        elif page is self.capture_page:
-            self.capture_view.set_image(image)
         timestamp = snapshot["timestamp"]
-        sample = self.trace.add(timestamp, snapshot["frame_id"], angle)
-        if self.history_archive is not None:
-            self.history_archive.submit(sample, image)
+        display_fps = self.preview_fps.currentData()
+        history_fps = self.history_fps.currentData()
+        display_due = display_fps > 0 and (
+            self._last_display_timestamp is None
+            or timestamp - self._last_display_timestamp >= 1 / display_fps - 1e-9
+        ) and (page is self.capture_page or (
+            page is self.live_page and self.history_selection is None
+        ))
+        archive_due = history_fps >= 0 and (
+            history_fps == 0 or self._last_archive_timestamp is None
+            or timestamp - self._last_archive_timestamp >= 1 / history_fps - 1e-9
+        )
+        if display_due or archive_due:
+            image = self.preview_image(snapshot)
+            if display_due:
+                if page is self.live_page:
+                    self.live_view.set_image(image)
+                else:
+                    self.capture_view.set_image(image)
+                self._last_display_timestamp = timestamp
+            if archive_due:
+                sample = self.trace.add(timestamp, snapshot["frame_id"], angle)
+                self._last_archive_timestamp = timestamp
+                if self.history_archive is not None:
+                    self.history_archive.submit(sample, image)
 
     def drain_measurements(self):
         if self.worker is None:
@@ -1213,13 +1397,16 @@ class MainWindow(QMainWindow):
         return added
 
     def preview_image(self, snapshot):
-        key = snapshot["timestamp"], snapshot["frame_id"], self.overlay_check.isChecked()
+        show_contour, show_obb, show_axis = (button.isChecked() for button in self.overlay_buttons)
+        key = snapshot["timestamp"], snapshot["frame_id"], show_contour, show_obb, show_axis
         if key != self._preview_cache_key:
             self._preview_cache_image = (
                 render_overlay(
-                    snapshot["image"], snapshot["detection"], ProcessingConfig(**snapshot["config"])
+                    snapshot["image"], snapshot["detection"],
+                    ProcessingConfig(**snapshot["config"]),
+                    show_contour=show_contour, show_obb=show_obb, show_axis=show_axis,
                 )
-                if self.overlay_check.isChecked()
+                if show_contour or show_obb or show_axis
                 else snapshot["image"]
             )
             self._preview_cache_key = key
@@ -1278,8 +1465,11 @@ class MainWindow(QMainWindow):
         self._last_preview_key = None
         self._preview_cache_key = None
         self._preview_cache_image = None
+        self._last_display_timestamp = None
+        self._last_archive_timestamp = None
         self.trace.reset(time.perf_counter())
-        self.overlay_check.setEnabled(True)
+        for button in self.overlay_buttons:
+            button.setEnabled(True)
         self.ui_text(self.history_status, "Livebild")
         self.ui_text(self.angle_label, "— °")
         self.ui_text(self.quality_label, "Bauteil: noch kein Bild")
@@ -1304,6 +1494,9 @@ class MainWindow(QMainWindow):
 
     def start_history(self):
         self.reset_live_state()
+        self.create_history_archive()
+
+    def create_history_archive(self):
         self.history_archive = archive = PreviewArchive(self)
         self._history_archives.append(archive)
         archive.image_loaded.connect(
@@ -1311,12 +1504,28 @@ class MainWindow(QMainWindow):
         )
         archive.start()
 
+    def clear_history(self):
+        """Clear local navigation and previews without interrupting acquisition."""
+        cursor = self.trace.measurements.cursor
+        if self.worker is not None:
+            # Skip the existing mailbox, including rows the GUI has not drawn yet.
+            cursor = self.worker.api_capture.history_measurements(cursor, 1)["latest_cursor"]
+        if self.history_archive is not None:
+            self.history_archive.stop()
+        self.create_history_archive()
+        self.trace.reset(self.trace.origin)
+        self.trace.measurements.cursor = cursor
+        self._last_archive_timestamp = None
+        self.return_to_live()
+        self.note("History gelöscht. Neue Bilder und Winkel werden ab jetzt gesammelt.")
+
     def select_history(self, sample):
         self.history_selection = sample
         self.live_view.mode = None
         self.live_view.first = None
         self.live_view.unsetCursor()
-        self.overlay_check.setEnabled(False)
+        for button in self.overlay_buttons:
+            button.setEnabled(False)
         self.show_history_position(sample)
         self.ui_text(
             self.angle_label,
@@ -1393,7 +1602,8 @@ class MainWindow(QMainWindow):
     def return_to_live(self):
         self.history_selection = None
         self.trace.live()
-        self.overlay_check.setEnabled(True)
+        for button in self.overlay_buttons:
+            button.setEnabled(True)
         self.ui_text(self.history_status, "Livebild")
         if self.last_snapshot is not None:
             snapshot = self.last_snapshot
@@ -1408,6 +1618,8 @@ class MainWindow(QMainWindow):
         manifests = set(self.data_dir.glob("*/recordings/*/manifest.json"))
         manifests.update(Path(self.output_path.text()).glob("*/manifest.json"))
         for manifest in sorted(manifests, reverse=True)[:100]:
+            if manifest.parent.name.startswith("."):
+                continue
             self.recordings.addItem(manifest.parent.name)
             self.recordings.item(self.recordings.count() - 1).setData(
                 Qt.ItemDataRole.UserRole, str(manifest.parent)
@@ -1565,6 +1777,7 @@ class MainWindow(QMainWindow):
                 "camera_profiles": self.camera_profiles,
                 "language": self.language,
                 "output_dir": self.output_path.text(),
+                "preview": self.preview_settings(),
             }
             target = self.data_dir / "settings.json"
             temporary = target.with_suffix(".tmp")
@@ -1604,9 +1817,18 @@ def main():
     parser.add_argument("--connect", action="store_true", help="Kamera beim Start verbinden")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     parser.add_argument("--language", choices=("de", "en"), help="Sprache: Deutsch / Englisch")
+    parser.add_argument(
+        "--opencv-threads", type=int,
+        help="OpenCV-Rechenthreads (Standard: 4; alternativ BIBAZU_OPENCV_THREADS)",
+    )
     args = parser.parse_args()
+    try:
+        opencv_threads = configure_opencv_threads(args.opencv_threads)
+    except ValueError as exc:
+        parser.error(str(exc))
     application = QApplication(sys.argv[:1])
     window = MainWindow(args.data_dir, demo=args.demo, language=args.language)
+    window.note(f"OpenCV: {opencv_threads} Rechenthread(s).")
     window.show()
     if args.connect and not args.demo:
         QTimer.singleShot(0, lambda: window.connect_camera(False))

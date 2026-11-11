@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -280,3 +282,151 @@ def test_configuration_requires_idle_and_capture_metadata_is_a_snapshot(managers
 def test_invalid_config_rejected(arguments):
     with pytest.raises(ValueError):
         CaptureConfig(**arguments)
+
+
+def wait_for_writer(predicate):
+    deadline = time.perf_counter() + 3
+    while time.perf_counter() < deadline:
+        if predicate():
+            return
+        time.sleep(0.005)
+    raise AssertionError("streaming writer did not make progress")
+
+
+def test_timed_minute_streams_every_original_beyond_ram_budget_and_ignores_passage_end(managers):
+    manager = managers(
+        start_mode="hardware", max_seconds=0.5, wait_seconds=0.1,
+        max_memory_mb=0.002, pre_roll_seconds=0,
+    )
+    original_config = manager.config
+    status = manager.start_timed(60, now=10)
+    assert status.timed_active and status.remaining_seconds == 60
+    for index in range(60):
+        pixels = frame(index)
+        status = manager.ingest(
+            pixels, 10 + index, index, detection(present=index % 2 == 0, motion=0, angle=index),
+            triggered=True,
+        )
+        pixels[:] = 255
+        assert status.state == "moving"
+        assert status.recorded_frames == index + 1
+        assert status.buffered_bytes <= manager.config.max_memory_mb * 1024**2
+        wait_for_writer(lambda: manager.status.buffered_frames == 0)
+    assert list(manager.output_dir.glob("session_*/manifest.json")) == []
+    assert len(list(manager.output_dir.glob(".session_*.tmp/frames/*.npy"))) == 60
+    # The deadline is exclusive; this frame belongs after the requested minute.
+    manager.ingest(frame(99), 70, 99, detection())
+    clip = saved(manager)
+    assert clip.manifest["stop_reason"] == "duration_elapsed"
+    assert clip.manifest["end_timestamp"] == 70
+    assert clip.manifest["trigger_source"] == "timed"
+    assert clip.manifest["capture_config"]["duration_seconds"] == 60
+    assert not clip.manifest["aborted"]
+    assert clip.frame_ids == list(range(60))
+    assert [row["angle_deg"] for row in clip.measurements] == list(range(60))
+    for index, pixels in enumerate(clip.frames):
+        np.testing.assert_array_equal(pixels, frame(index))
+    assert manager.config is original_config
+    assert manager.status.state == "idle"
+    assert manager.status.buffered_bytes == 0
+
+
+@pytest.mark.parametrize("stop", ["manual", "disconnect"])
+def test_timed_recording_can_be_stopped_early_without_losing_queued_images(managers, stop):
+    manager = managers()
+    manager.start_timed(now=10)
+    manager.ingest(frame(23), 10, 1, detection(motion=0))
+    if stop == "manual":
+        manager.disarm()
+    else:
+        assert manager.close(timeout=3)
+    clip = saved(manager)
+    assert clip.manifest["stop_reason"] == ("manual_stop" if stop == "manual" else "closed")
+    assert clip.frame_ids == [1]
+    np.testing.assert_array_equal(clip.frames[0], frame(23))
+    assert manager.status.buffered_bytes == 0
+
+
+def test_timed_recording_without_camera_frames_reports_failure(managers):
+    manager = managers()
+    manager.start_timed(1, now=10)
+    manager.poll(11)
+    clip = saved(manager)
+    assert clip.manifest["stop_reason"] == "no_frames"
+    assert clip.manifest["aborted"]
+    assert manager.status.error
+
+
+def test_timed_recording_writer_error_stops_acquisition_and_releases_memory(managers, monkeypatch):
+    manager = managers()
+
+    def disk_full(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(np, "save", disk_full)
+    manager.start_timed(now=10)
+    manager.ingest(frame(), 10, 1, detection())
+    assert manager.wait_until_saved(3)
+    assert "disk full" in manager.status.error
+    assert manager.status.state == "idle"
+    assert manager.status.buffered_bytes == 0
+    assert manager.last_clip_path is None
+    assert manager.completed_clips[-1].reason == "write_error"
+
+
+def test_timed_recording_slow_disk_aborts_instead_of_exceeding_memory_limit(managers):
+    manager = managers(max_memory_mb=0.0012)
+    persist = manager._persist
+    release = threading.Event()
+
+    def slow_writer(capture):
+        assert release.wait(3)
+        return persist(capture)
+
+    manager._persist = slow_writer
+    try:
+        manager.start_timed(now=10)
+        for index in range(3):
+            manager.ingest(frame(index), 10 + index * 0.01, index, detection())
+        assert manager.status.reason == "memory_limit"
+        assert manager.status.error
+        assert manager.status.dropped_frames == 1
+        assert manager.status.buffered_bytes <= manager.config.max_memory_mb * 1024**2
+    finally:
+        release.set()
+    clip = saved(manager)
+    assert clip.manifest["aborted"]
+    assert clip.frame_ids == [0, 1]
+    assert manager.status.buffered_bytes == 0
+
+
+def test_timed_recording_refuses_armed_capture_and_invalid_durations(managers):
+    manager = managers()
+    for seconds in (0, -1, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            manager.start_timed(seconds)
+    manager.arm()
+    with pytest.raises(RuntimeError, match="entschärfter"):
+        manager.start_timed()
+
+
+def test_clip_publication_retries_temporary_windows_directory_locks(managers, monkeypatch):
+    manager = managers()
+    replace = os.replace
+    attempts = []
+
+    def temporarily_locked(source, target):
+        attempts.append((source, target))
+        if len(attempts) < 3:
+            raise PermissionError("temporary sharing violation")
+        replace(source, target)
+
+    monkeypatch.setattr(os, "replace", temporarily_locked)
+    manager.start_timed(now=10)
+    manager.ingest(frame(42), 10, 1, detection())
+    manager.disarm()
+    clip = saved(manager)
+    assert len(attempts) == 3
+    assert not manager.status.error
+    assert clip.frame_ids == [1]
+    np.testing.assert_array_equal(clip.frames[0], frame(42))

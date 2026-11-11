@@ -106,6 +106,7 @@ class VisionApi(QObject):
             "session_active": self.lease.active(),
             "capture": asdict(snapshot["status"]),
             "processing": snapshot["config"],
+            "camera_geometry": snapshot.get("camera_geometry"),
             "capture_config": asdict(self.window.capture_config())
             if hasattr(self.window, "capture_config")
             else asdict(worker.capture_config),

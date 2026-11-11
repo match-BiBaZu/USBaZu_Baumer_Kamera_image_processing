@@ -22,6 +22,7 @@ class AngleTrace(QWidget):
         super().__init__()
         self.samples = deque()
         self.measurements = MeasurementHistory()
+        self.max_gap_seconds = 0.05
         self.preview_times = deque()
         self.preview_count = 0
         self.language = "de"
@@ -52,7 +53,7 @@ class AngleTrace(QWidget):
 
     def reset(self, origin):
         self.samples.clear()
-        self.measurements = MeasurementHistory()
+        self.measurements = MeasurementHistory(self.max_gap_seconds)
         self.preview_times.clear()
         self.preview_count = 0
         self.origin = origin
@@ -224,7 +225,12 @@ class TracePlot(QWidget):
         )
         for reason in (row.reason, row.break_reason):
             if reason is not None:
-                text += "\n" + translate(REASONS[reason], language)
+                text += "\n" + (
+                    translate(
+                        "Zeitlücke über {milliseconds:g} ms", language,
+                        milliseconds=row.gap_limit_ms,
+                    ) if reason == "time_gap" else translate(REASONS[reason], language)
+                )
         text += "\n" + translate("Klick rastet zum nächsten Vorschauframe ein.", language)
         self.setToolTip(text)
 

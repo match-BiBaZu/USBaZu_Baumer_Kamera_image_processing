@@ -17,7 +17,7 @@ REASONS = {
     "frame_gap": "Frame-ID-Unterbrechung",
     "buffer_overflow": "Messpuffer übergelaufen",
     "sequence_gap": "Messwerte fehlen",
-    "time_gap": "Zeitlücke über 50 ms",
+    "time_gap": "Zeitlücke",
     "configuration": "Messkonfiguration geändert",
     "ambiguous_step": "Winkelschritt um 90° uneindeutig",
 }
@@ -34,6 +34,7 @@ class AngleMeasurement:
     break_reason: str | None
     segment: int
     epoch: int
+    gap_limit_ms: float = 50.0
 
 
 class MeasurementHistory:
@@ -43,7 +44,10 @@ class MeasurementHistory:
     every new frame. At most 4095 expired records await the next compaction.
     """
 
-    def __init__(self):
+    def __init__(self, max_gap_seconds=0.05):
+        if not math.isfinite(max_gap_seconds) or max_gap_seconds <= 0:
+            raise ValueError("time gap limit must be positive and finite")
+        self.max_gap_seconds = float(max_gap_seconds)
         self._items = []
         self._times = []
         self._head = 0
@@ -104,7 +108,7 @@ class MeasurementHistory:
                     and frame_id != previous.frame_id + 1
                 ):
                     boundary = "frame_gap"
-                elif timestamp - previous.timestamp > 0.050000001:
+                elif timestamp - previous.timestamp > self.max_gap_seconds + 1e-9:
                     boundary = "time_gap"
                 elif previous.continuous_angle is None:
                     boundary = "after_invalid"
@@ -125,7 +129,8 @@ class MeasurementHistory:
             ):
                 segment += 1
             measurement = AngleMeasurement(
-                sequence, timestamp, frame_id, raw, continuous, reason, boundary, segment, epoch
+                sequence, timestamp, frame_id, raw, continuous, reason, boundary, segment, epoch,
+                self.max_gap_seconds * 1000,
             )
             self._items.append(measurement)
             self._times.append(timestamp)

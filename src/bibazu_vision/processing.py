@@ -11,10 +11,17 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
+
+# Match the previous float64 tint followed by uint8 truncation, using a native
+# per-channel lookup instead of allocating/indexing floating-point pixel arrays.
+_CONTOUR_TINT = (
+    np.arange(256, dtype=np.float64)[:, None, None] * 0.82
+    + np.array([30, 220, 30], dtype=np.float64)[None, None, :] * 0.18
+).astype(np.uint8)
 
 
 @dataclass
@@ -41,9 +48,37 @@ class ProcessingConfig:
     ignore_border_touch: bool = False
 
 
+@dataclass(frozen=True)
+class _MaskSource:
+    """Owned segmentation at processing resolution, with frozen image geometry."""
+
+    binary: np.ndarray
+    image_shape: tuple[int, int]
+    bounds: tuple[int, int, int, int]
+
+    def get_region(self) -> np.ndarray:
+        x0, y0, x1, y1 = self.bounds
+        return (
+            self.binary if self.binary.shape == (y1 - y0, x1 - x0)
+            else cv2.resize(self.binary, (x1 - x0, y1 - y0), interpolation=cv2.INTER_NEAREST)
+        )
+
+    def materialize(self, region: np.ndarray | None = None) -> np.ndarray:
+        height, width = self.image_shape
+        x0, y0, x1, y1 = self.bounds
+        if region is None:
+            region = self.get_region()
+        if self.bounds == (0, 0, width, height):
+            return region
+        mask = np.zeros(self.image_shape, np.uint8)
+        mask[y0:y1, x0:x1] = region
+        return mask
+
+
 @dataclass
 class Detection:
-    mask: np.ndarray
+    # Full-sized tint mask is optional. Measurements and recordings never need it.
+    mask: np.ndarray | None
     contour: np.ndarray | None = None
     box: np.ndarray | None = None
     center: tuple[float, float] | None = None
@@ -54,6 +89,31 @@ class Detection:
     touching_border: bool = False
     motion_fraction: float = 0.0
     processing_ms: float = 0.0
+    _mask_source: _MaskSource | None = field(default=None, repr=False)
+    _mask_region: np.ndarray | None = field(default=None, repr=False)
+
+    def get_mask(self) -> np.ndarray:
+        """Explicit full-sized mask access for analysis clients; previews use the ROI."""
+        if self.mask is None:
+            if self._mask_source is None:
+                raise ValueError("Detection has no segmentation mask.")
+            self.mask = self._mask_source.materialize(self._mask_region)
+        return self.mask
+
+    def get_mask_region(self, image_shape):
+        """Lazily enlarge only the ROI needed for a displayed segmentation tint."""
+        if self.mask is not None:
+            if self.mask.shape != image_shape:
+                raise ValueError("Detection mask size differs from image.")
+            height, width = image_shape
+            return (0, 0, width, height), self.mask
+        if self._mask_source is None:
+            raise ValueError("Detection has no segmentation mask.")
+        if self._mask_source.image_shape != image_shape:
+            raise ValueError("Detection mask size differs from image.")
+        if self._mask_region is None:
+            self._mask_region = self._mask_source.get_region()
+        return self._mask_source.bounds, self._mask_region
 
 
 def wrap_axis_angle(angle: float) -> float:
@@ -183,17 +243,10 @@ class FrameProcessor:
         # Two small morphology passes suppress sensor speckles and close tiny gaps.
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, self._kernel)
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, self._kernel)
-        if (x0, y0, x1, y1) == (0, 0, width, height) and binary.shape == gray.shape:
-            full_mask = binary
-        else:
-            full_mask = np.zeros_like(gray)
-            if binary.shape != crop.shape:
-                full_mask[y0:y1, x0:x1] = cv2.resize(
-                    binary, (source_width, source_height), interpolation=cv2.INTER_NEAREST
-                )
-            else:
-                full_mask[y0:y1, x0:x1] = binary
-        detection = Detection(mask=full_mask, motion_fraction=motion)
+        detection = Detection(
+            mask=None, motion_fraction=motion,
+            _mask_source=_MaskSource(binary, (height, width), (x0, y0, x1, y1)),
+        )
 
         contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
@@ -272,8 +325,20 @@ class FrameProcessor:
         return detection
 
 
-def render_overlay(image: np.ndarray, detection: Detection, config: ProcessingConfig) -> np.ndarray:
-    """Copy an image to BGR and highlight mask, contour, OBB and chosen axis."""
+def render_overlay(
+    image: np.ndarray,
+    detection: Detection,
+    config: ProcessingConfig,
+    *,
+    show_contour: bool = True,
+    show_obb: bool = True,
+    show_axis: bool = True,
+) -> np.ndarray:
+    """Draw independent display layers on a BGR copy, without changing measurements.
+
+    Contour includes the segmentation tint; axis includes its center marker and
+    the chute reference. ROI and status remain visible while any layer is on.
+    """
     gray = _gray(image)
     if image.ndim == 3 and image.shape[2] == 3:
         output = image.copy()
@@ -281,21 +346,23 @@ def render_overlay(image: np.ndarray, detection: Detection, config: ProcessingCo
         output = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
     else:
         output = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-    if detection.mask.shape != gray.shape:
-        raise ValueError("Detection mask size differs from image.")
-    selected = detection.mask > 0
-    output[selected] = (output[selected] * 0.82 + np.array([30, 220, 30]) * 0.18).astype(np.uint8)
+    if not (show_contour or show_obb or show_axis):
+        return output
+    if show_contour:
+        (mx0, my0, mx1, my1), mask = detection.get_mask_region(gray.shape)
+        region = output[my0:my1, mx0:mx1]
+        cv2.copyTo(cv2.LUT(region, _CONTOUR_TINT), mask, region)
     height, width = gray.shape
     x0, y0, x1, y1 = _roi_bounds(config, width, height)
     if config.roi is not None:
         cv2.rectangle(output, (x0, y0), (x1 - 1, y1 - 1), (180, 180, 180), 1)
-    if detection.contour is not None:
+    if show_contour and detection.contour is not None:
         cv2.drawContours(
             output, [np.rint(detection.contour).astype(np.int32)], -1, (70, 240, 70), 2
         )
-    if detection.box is not None:
+    if show_obb and detection.box is not None:
         cv2.polylines(output, [np.rint(detection.box).astype(np.int32)], True, (255, 200, 20), 2)
-    if detection.center is not None:
+    if show_axis and detection.center is not None:
         center = np.array(detection.center)
         cv2.circle(output, tuple(np.rint(center).astype(int)), 4, (255, 255, 255), -1)
         if detection.axis_deg is not None:
@@ -310,20 +377,22 @@ def render_overlay(image: np.ndarray, detection: Detection, config: ProcessingCo
             start = tuple(np.rint(center - direction * extent).astype(int))
             end = tuple(np.rint(center + direction * extent).astype(int))
             cv2.line(output, start, end, (230, 70, 230), 2, cv2.LINE_AA)
-    # A short reference line near the ROI bottom marks the calibrated chute angle.
-    anchor = np.array([x0 + 15.0, y1 - 20.0])
-    reference_length = min(140, max(15, (x1 - x0) // 3))
-    chute_radians = math.radians(config.chute_angle_deg)
-    reference_end = (
-        anchor + np.array([math.cos(chute_radians), -math.sin(chute_radians)]) * reference_length
-    )
-    cv2.line(
-        output,
-        tuple(np.rint(anchor).astype(int)),
-        tuple(np.rint(reference_end).astype(int)),
-        (30, 180, 255),
-        2,
-    )
+    if show_axis:
+        # A short reference line near the ROI bottom marks the calibrated chute angle.
+        anchor = np.array([x0 + 15.0, y1 - 20.0])
+        reference_length = min(140, max(15, (x1 - x0) // 3))
+        chute_radians = math.radians(config.chute_angle_deg)
+        reference_end = (
+            anchor
+            + np.array([math.cos(chute_radians), -math.sin(chute_radians)]) * reference_length
+        )
+        cv2.line(
+            output,
+            tuple(np.rint(anchor).astype(int)),
+            tuple(np.rint(reference_end).astype(int)),
+            (30, 180, 255),
+            2,
+        )
     angle_text = "ambiguous" if detection.contour is not None else "no part"
     if detection.touching_border and not config.ignore_border_touch:
         angle_text = "clipped"

@@ -71,6 +71,31 @@ verwendet `data/camera_vlxt_700006383255/background.png`. Alte Durchläufe bleib
 Profilwechsel setzen Livebild und Bild-/Messhistorie zurück; eine geöffnete Auswertung
 bleibt erhalten. Im Demo-Modus werden die Kameraprofile nicht überschrieben.
 
+**Kameraseitig oben/unten beschneiden:** Unter **Kamera** geben **Kamera: oben
+abschneiden** und **Kamera: unten abschneiden** die zu entfernenden Sensorzeilen
+an. Die Werte werden beim Verbinden über `OffsetY` und `Height` gesetzt; während
+einer Verbindung sind sie gesperrt. Die Bildbreite bleibt unverändert. Die Kamera
+liefert nur den verbleibenden Ausschnitt, auch in Originalaufnahmen. Bei 1920×1464
+und je 200 Pixeln oben/unten bleiben 1920×1064 Pixel, also rund 27 % weniger
+Bilddaten. Die Kamera-Inkremente werden berücksichtigt; die tatsächlich entfernten
+Zeilen stehen im Protokoll. Beim regulären Trennen werden die vorherigen
+Hardwarewerte wiederhergestellt. Wiederholtes Verbinden mit demselben Beschnitt
+bezieht sich auf den vollen Sensorbereich und beschneidet nicht erneut kumulativ.
+Automatische Belichtungs- und Verstärkungsregelungen werden vor dem Abfragen der
+ROI-Grenzen temporär deaktiviert, da ihre Messbereiche sonst die Mindestbildhöhe
+auf das volle Bild festlegen können. Beim Trennen werden zuerst Bildausschnitt
+und Automatik-Messbereiche und anschließend die ursprünglichen Automatikmodi
+wiederhergestellt.
+
+Die Beschnittwerte werden je Kameraprofil separat in `data/camera_roi_settings.json`
+gespeichert. Ein Hintergrund, dessen gespeicherter Ausschnitt die neue Ansicht
+vollständig abdeckt, wird passend zugeschnitten. Neu aufgenommene Hintergründe
+erhalten eine `background.json` mit Bildposition und Prüfsumme, damit gleich große
+Bilder mit unterschiedlichen Positionen nicht verwechselt werden. Ein unpassender
+Hintergrund wird mit Hinweis übersprungen. Der Software-Messbereich wird anhand
+seiner gespeicherten Bildposition verschoben und nötigenfalls begrenzt; danach im
+Livebild prüfen, ob das komplette Bauteil einschließlich Drehung hineinpasst.
+
 Passt ein gespeicherter Hintergrund nicht zur aktuellen Kameraauflösung, wird er
 mit einem Hinweis im Protokoll übersprungen. Die Verbindung und das Livebild bleiben
 aktiv; zunächst gilt die absolute Helligkeitsschwelle. Bei leerer Rutsche einen neuen
@@ -111,6 +136,56 @@ Die Oberfläche trennt die Aufgaben in drei Reiter mit jeweils eigener Seitenlei
 Seiten oben bereit. Die Statuszeile unten zeigt den Aufnahmestatus auch dann,
 wenn gerade eine andere Seite geöffnet ist. **Protokoll & Details** blendet
 Meldungen, Frame-ID, Bildlücken und Verarbeitungsdauer ein.
+
+Unter dem Livebild schalten **Kontur**, **OBB** und **Messachse** die Markierungen
+einzeln ein und aus. Aktive Buttons sind blau hinterlegt. Kontur umfasst die grüne
+Segmentierungsfläche; Messachse umfasst die Bauteilachse und die Rutschenreferenz.
+Die Auswahl gilt auch für die Aufnahmevorschau. Alle drei ausgeschaltet zeigen das
+Originalbild. Die Schalter verändern die Darstellung; die Winkelberechnung und
+gespeicherten Originalbilder verwenden weiterhin die unveränderten Kamerabilder.
+Historische Vorschaubilder behalten ihre damaligen Markierungen.
+
+Unter **Vorschau & Bildhistorie** auf der Live-Seite lassen sich **Livebild anzeigen**
+und **Bilder für Zeitleiste** getrennt begrenzen oder ausschalten. Als sparsamer
+Start eignen sich beispielsweise 20 FPS Anzeige und 5 FPS Bildhistorie oder eine
+ausgeschaltete Bildhistorie. Die Einstellungen werden global für beide Kameras
+gespeichert. Bestehende Installationen behalten zunächst 60 FPS Anzeige und alle
+verfügbaren Vorschaubilder. Die Winkelkurve und API behalten unabhängig davon alle
+berechneten Messwerte. Die Auswahl verringert nur die Anzahl temporärer Bilder;
+für eine zeitlich dichte Flip-Auswertung eine Originalaufnahme starten und im
+Reiter **Auswertung** öffnen.
+
+**Zeitlücke** legt die maximale Zeit zwischen zwei
+Messwerten für eine zusammenhängende Kurve fest (Standard 100 ms, einstellbar
+zwischen 10 und 1000 ms). Die Einstellung wird vor dem Verbinden gewählt und
+ändert weder Winkelwerte noch Aufnahmegeschwindigkeit. Fehlende Bild-IDs,
+ungültige Winkel, geänderte Messreferenzen und Pufferüberläufe bleiben unabhängig
+von dieser Grenze Unterbrechungen. Ein höherer Wert rekonstruiert keine Bewegung
+zwischen fehlenden Bildern. Der Tooltip nennt die für den jeweiligen Messpunkt
+tatsächlich verwendete Zeitgrenze.
+
+Die Segmentierung behält pro Messbild nur ihre kleine Maske in der gewählten
+Verarbeitungsauflösung. Erst wenn ein Vorschaubild mit eingeschalteter **Kontur**
+benötigt wird, wird die Maske im Messbereich vergrößert und die grüne Fläche
+gezeichnet. OBB und Messachse benötigen diese Vergrößerung nicht. Originalbilder,
+Winkelberechnung, API und Aufzeichnung verwenden weiterhin dieselben Kameradaten.
+
+OpenCV startet standardmäßig mit **vier Rechenthreads**, bevor Kamera-, Vorschau-
+oder Schreibthreads anlaufen. Damit wird die bisherige automatische Ausweitung
+auf alle verfügbaren CPU-Threads begrenzt. Auf anderen Rechnern lässt sich das
+beim Start vergleichen, beispielsweise `./Start.ps1 -OpenCvThreads 2` oder
+`bibazu-vision --opencv-threads 2`. Alternativ setzt die Umgebungsvariable
+`BIBAZU_OPENCV_THREADS` den Wert; ein explizites Startargument hat Vorrang. Es muss
+eine positive ganze Zahl sein. Die tatsächliche Zahl steht im Protokoll.
+Während einer laufenden Verbindung wird die globale Einstellung nicht geändert.
+
+`scripts/benchmark_processing.py --help` beschreibt einen Kamera-unabhängigen
+Vergleich mit gespeicherten Bildern, optionalem Hintergrund und einer JSON-Datei
+mit Erkennungseinstellungen. Er vergleicht 1, 2, 4 und die OpenCV-Standardzahl an
+Threads und schreibt die Messzeiten als JSON. Gemessen werden Bildverarbeitung
+und optionale Markierungen; Kameraübertragung, Qt-Anzeige, JPEG und Festplatte
+sind nicht enthalten. Eine niedrigere Rechenzeit garantiert daher nicht denselben
+Faktor bei den tatsächlich erreichten Kamera-FPS.
 
 Auf der Live-Seite ist **Erkennung & Referenz** zunächst geöffnet. **Kamera**
 und **Weitere Erkennungseinstellungen** sind eingeklappt. Dort befinden sich
@@ -199,13 +274,26 @@ Fehlende Winkel werden als Lücken und als **Kein gültiger Winkel** angezeigt.
 
 Die Bildhistorie verwendet JPEG-Vorschaubilder (Qualität 85, längste Seite maximal
 960 Pixel) einschließlich der damals eingeschalteten Messmarkierungen. Ihre
-Speicherung und das Laden erfolgen im Hintergrund in einem temporären Ordner.
+Speicherung und das Laden erfolgen im Hintergrund in einem temporären Ordner
+unter Windows `%TEMP%/usbazu-preview-*`. Die JPEGs liegen auf dem Datenträger.
 Die Bilder sind auf zehn Minuten und zusätzlich **2 GiB** begrenzt. Bei erreichtem
-Speicherlimit, überlasteter Schreibwarteschlange oder Dateifehlern bleiben die
+Speicherlimit werden die ältesten Bilder gelöscht. Bei überlasteter
+Schreibwarteschlange oder Dateifehlern bleiben die
 Winkelwerte verfügbar; betroffene Bilder erscheinen als **nicht verfügbar**.
-Die Zeitangaben sind Host-Abrufzeiten, keine Belichtungszeitstempel. Es werden
-etwa 60 Vorschauframes pro Sekunde übernommen. Die Kurve verwendet unabhängig
-davon alle verarbeiteten Kameramesswerte; ausgelassene Vorschauframes bedeuten
+Ein nach Alter geordneter Index vermeidet das Durchsuchen der gesamten Dateiliste
+bei jedem Bild. Die automatische Bereinigung löscht höchstens acht Dateien pro
+Durchlauf; größere Rückstände werden in weiteren kleinen Portionen abgearbeitet.
+Abgelaufene Bilder sind dabei sofort nicht mehr auswählbar. Reicht der freie Platz
+nach dieser Portion noch nicht, wird das neue Vorschaubild ausgelassen, statt die
+Bereinigung für eine lange Löschschleife zu blockieren. Originalaufnahmen und
+Winkelmesswerte werden durch diese Begrenzung nicht ausgedünnt.
+Die reine Indexverwaltung lässt sich mit
+`python scripts/benchmark_history.py` bei unterschiedlichen History-Längen vergleichen;
+dieser Vergleich misst weder JPEG-Komprimierung noch Datenträger oder Kamera-FPS.
+Die Zeitangaben sind Host-Abrufzeiten, keine Belichtungszeitstempel. Die Bildhistorie
+übernimmt die eingestellte Zahl an Vorschaubildern (höchstens etwa 60 pro Sekunde).
+Die Kurve verwendet unabhängig davon alle verarbeiteten Kameramesswerte;
+ausgelassene Vorschauframes bedeuten
 deshalb keinen Verlust von Kurvenwerten. Für Originalbilder die
 Durchlaufaufzeichnung verwenden.
 
@@ -221,7 +309,7 @@ Ungültige Messwerte sind gelblich markiert; Daten-, Zeit- und Konfigurationslü
 grau. Ein Tooltip nennt Originalwinkel, fortlaufenden Winkel und den vorhandenen
 Lückengrund: fehlender geeigneter Umriss, uneindeutige Achse, Randkontakt oder
 Datenunterbrechung. Bei ungültigen Werten, fehlenden Frame-IDs, Pufferüberlauf,
-mehr als 50 ms Abstand, einem genau um 90° uneindeutigen Schritt oder geänderter
+mehr als der eingestellten Zeitgrenze Abstand, einem genau um 90° uneindeutigen Schritt oder geänderter
 Messkonfiguration beginnt ein neuer Abschnitt beim nächsten gültigen Originalwinkel.
 Es wird keine Drehung über eine solche Unterbrechung hinweg angenommen.
 
@@ -232,9 +320,19 @@ ohne Vorschau werden seit Verbindungsbeginn gezählt. Bei langen Zeitfenstern
 behält die Zeichnung die tatsächlichen Minima und Maxima je Bildschirmspalte;
 die vollständigen Messpunkte bleiben im Historienpuffer.
 
-Nach dem Trennen bleibt die Historie betrachtbar. Eine neue Verbindung beginnt
-eine neue Historie; beim Verbindungswechsel und regulären Programmende werden
-die temporären Bilder entfernt.
+Mit **History löschen** neben **Live** werden die bisherige lokale Winkelkurve und
+die History-Bilder gelöscht und die Anzeige kehrt zum Livebild zurück. Bei laufender
+Kamera werden anschließend neue History-Bilder gesammelt. Kamera, gestartete
+Aufzeichnungen, API-Messwerte und gespeicherte Originalaufnahmen bleiben erhalten.
+
+Während die Verbindung läuft, werden Bilder und Kurvenwerte älter als zehn Minuten
+fortlaufend entfernt. Nach dem Trennen bleibt die Historie betrachtbar; ihre
+Altersbereinigung pausiert. Eine neue Verbindung beginnt eine neue Historie und
+entfernt den bisherigen temporären Bildordner. Auch **History löschen** und ein
+reguläres Programmende entfernen den bisherigen Ordner im Hintergrund.
+Nach einem Absturz oder erzwungenem Beenden können temporäre Dateien zurückbleiben;
+auch Dateisperren können das Löschen verhindern. Gespeicherte Originalaufnahmen und
+Referenzhintergründe werden durch diese Bereinigung nicht gelöscht.
 
 ## Lichtschranke und Aufzeichnung
 
@@ -277,6 +375,27 @@ Teil beendet keinen erfolgreichen Durchlauf. Wartezeit, maximale Dauer und ein
 gemeinsames RAM-Limit begrenzen alle Aufzeichnungen; Abbrüche und Überlast werden
 im Manifest ausgewiesen. Die Bilddaten werden nach dem Durchlauf von einem
 separaten Writer gespeichert. Währenddessen bleiben Erfassung und Vorschau aktiv.
+
+**Zeitaufnahme per Knopfdruck:** Unter **Durchläufe aufnehmen** startet **1 Minute
+aufnehmen** sofort eine einzelne 60-Sekunden-Aufnahme mit Originalbildern und
+Winkeln. Die Kamera muss kontinuierlich im Modus **Live + Eingang beobachten**
+arbeiten; eine automatische Durchlaufaufnahme muss zuvor beendet und entschärft
+sein. Die Zeitaufnahme wartet nicht auf Bewegung und endet nicht, wenn das Bauteil
+das Bild verlässt. Sie endet nach 60 Sekunden automatisch oder früher über
+**Aufzeichnung beenden**. Ein Countdown und die Anzahl übernommener Originalbilder
+werden angezeigt. Die üblichen Grenzen für Wartezeit und Durchlaufdauer gelten
+hier nicht; das RAM-Limit begrenzt den Schreibpuffer. Originalbilder werden bereits
+während der Minute verlustlos auf die Festplatte geschrieben. Ein voller Puffer
+oder Schreibfehler wird gemeldet; eine wegen Überlast verkürzte Aufnahme ist als
+abgebrochen markiert. Hintergrund und Messreferenz sind währenddessen gesperrt.
+
+Die Zeitaufnahme verwendet jedes Bild, das die Erfassung tatsächlich an die
+Verarbeitung liefert, auch bei ausgeschalteter oder langsamer Vorschau. Sie erhöht
+die erreichte Kamerarate nicht; Bild-ID-Lücken bleiben im Manifest sichtbar.
+Bei 1920×1464 Pixeln in Mono8 benötigen 60 Sekunden bei 30 FPS ungefähr 5 GB
+Bilddaten, bei 200 FPS ungefähr 34 GB zuzüglich Dateiverwaltung. Nach Abschluss
+steht der Clip wie ein Durchlauf in **Auswertung** bereit, einschließlich Zeitlupe
+und CSV-Export. Ohne gestartete Aufzeichnung werden keine Originalclips gespeichert.
 
 ## Daten und Kontrolle
 

@@ -14,7 +14,7 @@ from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
 from bibazu_vision import history as history_module
-from bibazu_vision.history import HistorySample, PreviewArchive
+from bibazu_vision.history import HistorySample, PreviewArchive, _PreviewFiles
 from bibazu_vision.history_trace import AngleTrace
 
 
@@ -174,6 +174,30 @@ def test_archive_queue_limits_and_dropped_images(qt_app, archives):
     assert not archive.submit(HistorySample(2, 3, 3, 2), np.zeros((11, 11), np.uint8))
 
 
+def test_archive_stop_removes_in_flight_image_and_directory(qt_app, archives, monkeypatch):
+    archive = archives()
+    entered, release = threading.Event(), threading.Event()
+    original = archive.encode
+
+    def encode(image):
+        entered.set()
+        assert release.wait(3)
+        return original(image)
+
+    monkeypatch.setattr(archive, "encode", encode)
+    archive.start()
+    try:
+        assert archive.submit(HistorySample(0, 1, 1, 0), np.zeros((20, 30), np.uint8))
+        wait_for(qt_app, entered.is_set)
+        directory = archive.directory
+        assert directory.exists()
+        archive.stop()
+    finally:
+        release.set()
+    assert archive.wait(3000)
+    assert not directory.exists()
+
+
 def test_archive_expiry_quota_missing_and_corrupt_files(qt_app, archives):
     image = np.full((40, 60), 80, np.uint8)
     archive = archives(max_bytes=len(PreviewArchive.encode(image)) + 10)
@@ -232,3 +256,81 @@ def test_archive_unavailable_temp_volume_keeps_thread_responsive(qt_app, archive
     assert archive.submit(HistorySample(0, 1, 1, None), np.zeros((20, 30), np.uint8))
     assert load(qt_app, archive, 0) is None
     assert archive.isRunning()
+
+
+class IndexedFile:
+    def __init__(self, *, locked=False):
+        self.locked = locked
+        self.deletions = 0
+
+    def unlink(self, *, missing_ok):
+        self.deletions += 1
+        if self.locked:
+            raise PermissionError("File is locked")
+
+    def read_bytes(self):
+        return b"jpeg"
+
+
+def test_full_history_pruning_never_scans_all_entries():
+    class NoScanDict(dict):
+        def __iter__(self):
+            raise AssertionError("History cleanup must not scan the full index")
+
+        def items(self):
+            raise AssertionError("History cleanup must not copy the full index")
+
+    index = _PreviewFiles(36_000 * 10)
+    for key in range(36_000):
+        index.add(HistorySample(key, key / 60, key, 0), IndexedFile(), 10)
+    index.files = NoScanDict(index.files)
+    for key in range(100):
+        # Both the ten-minute age limit and the disk quota roll forward.
+        assert not index.prune((key + 0.5) / 60, required_bytes=10)
+        index.add(HistorySample(36_000 + key, 600 + key / 60, key, 0), IndexedFile(), 10)
+        assert index.used_bytes == index.max_bytes
+        assert len(index.files) == 36_000
+    assert index.read(0, 0) is None
+    assert index.read(35_999, 0) == b"jpeg"
+
+
+def test_index_cleanup_is_bounded_and_keeps_locked_files_accounted_for():
+    index = _PreviewFiles(1000)
+    paths = [IndexedFile(locked=key == 0) for key in range(25)]
+    for key, path in enumerate(paths):
+        index.add(HistorySample(key, key, key, 0), path, 10)
+    assert index.prune(24)
+    assert sum(path.deletions for path in paths) == 8
+    assert index.used_bytes == 180  # Seven deleted; the locked oldest stays counted.
+    assert index.read(0, 24) is None
+    assert index.read(23, 24) is None  # Pending deletion is not selectable either.
+    assert index.read(24, 24) == b"jpeg"  # Retain the exact boundary.
+    paths[0].locked = False
+    while index.prune(24):
+        pass
+    assert set(index.files) == {24}
+    assert index.used_bytes == 10
+
+
+def test_index_quota_evicts_oldest_timestamp_after_prioritized_writes():
+    index = _PreviewFiles(20)
+    for key in (2, 0, 1):
+        index.add(HistorySample(key, key, key, 0), IndexedFile(), 10)
+    assert not index.prune(float("-inf"), required_bytes=10)
+    assert set(index.files) == {2}
+    assert index.used_bytes == 10
+
+
+def test_large_expiry_backlog_finishes_without_frames_and_keeps_reads_working(qt_app, archives):
+    archive = archives()
+    archive.start()
+    for key in range(25):
+        assert archive.submit(
+            HistorySample(key, 100 + key, key, 0), np.full((20, 30), 80, np.uint8)
+        )
+        assert load(qt_app, archive, key) is not None
+    archive.expire_before(124)
+    assert load(qt_app, archive, 24).mean() == pytest.approx(80, abs=1)
+    assert load(qt_app, archive, 0) is None
+    wait_for(qt_app, lambda: len(list(archive.directory.glob("*.jpg"))) == 1)
+    assert (archive.directory / "24.jpg").exists()

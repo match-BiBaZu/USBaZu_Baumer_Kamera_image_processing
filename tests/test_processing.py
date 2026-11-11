@@ -1,6 +1,7 @@
 """Behavioral checks for arbitrary silhouettes, angle calibration and isolation."""
 
 import math
+from itertools import product
 
 import cv2
 import numpy as np
@@ -70,7 +71,7 @@ def test_background_difference_detects_both_dark_and_light_without_adapting():
             assert result.angle_deg == pytest.approx(27, abs=0.8)
     result = processor.process(np.full((320, 360), 120, np.uint8))
     assert result.contour is None
-    assert not result.mask.any()
+    assert not result.get_mask().any()
     processor.clear_background()
     assert not processor.has_background
 
@@ -86,6 +87,38 @@ def test_absolute_light_segmentation_accepts_bgr_image():
     assert not np.array_equal(overlay, image)
 
 
+@pytest.mark.parametrize("show_contour,show_obb,show_axis", tuple(product((False, True), repeat=3)))
+def test_display_layers_are_independent_and_leave_measurements_and_pixels_unchanged(
+    show_contour, show_obb, show_axis,
+):
+    processor = FrameProcessor(ProcessingConfig(method="pca"))
+    image = silhouette(17, irregular=True)
+    detection = processor.process(image)
+    original_image = image.copy()
+    original_mask = detection.get_mask().copy()
+    original_contour = detection.contour.copy()
+    original_box = detection.box.copy()
+    original_angle = detection.angle_deg
+    overlay = render_overlay(
+        image, detection, processor.config,
+        show_contour=show_contour, show_obb=show_obb, show_axis=show_axis,
+    )
+    for color, visible in (
+        ((70, 240, 70), show_contour),
+        ((255, 200, 20), show_obb),
+        ((230, 70, 230), show_axis),
+    ):
+        assert bool(np.any(np.all(overlay == color, axis=2))) == visible
+    if not (show_contour or show_obb or show_axis):
+        np.testing.assert_array_equal(overlay, cv2.cvtColor(image, cv2.COLOR_GRAY2BGR))
+    np.testing.assert_array_equal(image, original_image)
+    np.testing.assert_array_equal(detection.mask, original_mask)
+    np.testing.assert_array_equal(detection.contour, original_contour)
+    np.testing.assert_array_equal(detection.box, original_box)
+    assert detection.angle_deg == original_angle
+    assert processor.process(image).angle_deg == original_angle
+
+
 @pytest.mark.parametrize("scale", [1.0, 0.5, 0.3])
 def test_roi_excludes_distractor_and_returns_original_coordinates(scale):
     image = silhouette(24, center=(220, 190))
@@ -94,9 +127,9 @@ def test_roi_excludes_distractor_and_returns_original_coordinates(scale):
     result = processor.process(image)
     assert result.angle_deg == pytest.approx(24, abs=1.5)
     assert result.center == pytest.approx((220, 190), abs=3)
-    assert result.mask.shape == image.shape
-    assert not result.mask[:105].any()
-    assert not result.mask[:, :130].any()
+    assert result.get_mask().shape == image.shape
+    assert not result.get_mask()[:105].any()
+    assert not result.get_mask()[:, :130].any()
     # At small scales, interpolated edge intensities and contour pixel centers
     # can reduce area; it must still be in original, not downsampled, pixel units.
     assert result.area == pytest.approx(156 * 48, rel=0.2)

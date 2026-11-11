@@ -133,3 +133,23 @@ def test_fifty_ms_is_allowed_and_low_quality_does_not_hide_a_valid_angle():
     history.ingest(batch)
     assert history.last.continuous_angle == 40
     assert history.last.reason is None and history.last.break_reason is None
+
+
+def test_configurable_time_limit_never_hides_missing_frames_or_invalid_angles():
+    history = MeasurementHistory(max_gap_seconds=0.1)
+    batch = rows([0, 40], dt=0.08)
+    history.ingest(batch)
+    assert history.last.break_reason is None
+    assert history.last.gap_limit_ms == 100
+    history.ingest(rows([60], start=100.19, sequence=3, frame_id=3))
+    assert history.last.break_reason == "time_gap"
+    history.ingest(rows([70], start=100.20, sequence=4, frame_id=5))
+    assert history.last.break_reason == "frame_gap"
+    history.ingest(rows([None], start=100.21, sequence=5, frame_id=6))
+    assert history.last.reason is not None
+
+
+@pytest.mark.parametrize("seconds", [0, -1, float("nan"), float("inf")])
+def test_time_limit_requires_a_positive_finite_value(seconds):
+    with pytest.raises(ValueError):
+        MeasurementHistory(seconds)

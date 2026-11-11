@@ -8,12 +8,18 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-import cv2
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from .api_capture import ApiCapture
 from .camera import BaumerCamera, CameraConfig, CameraSettingsError
 from .demo import DemoCamera
+from .image_geometry import (
+    aligned_background,
+    frame_geometry,
+    load_background,
+    save_background,
+    translated_roi,
+)
 from .local_api_runtime import ApiError
 from .processing import FrameProcessor, ProcessingConfig
 from .recording import CaptureConfig, CaptureManager
@@ -33,6 +39,7 @@ class PipelineWorker(QThread):
         data_dir: Path,
         demo=False,
         output_dir=None,
+        processing_geometry=None,
     ):
         super().__init__()
         self.camera_config = camera_config
@@ -41,6 +48,7 @@ class PipelineWorker(QThread):
         self.data_dir = Path(data_dir)
         self.demo = demo
         self.output_dir = Path(output_dir) if output_dir else self.data_dir / "recordings"
+        self.processing_geometry = processing_geometry
         self.commands = queue.Queue(maxsize=100)
         self.lock = threading.Lock()
         self.latest = None
@@ -113,10 +121,14 @@ class PipelineWorker(QThread):
             processor = FrameProcessor(self.processing_config)
             background_path = self.data_dir / "background.png"
             pending_background = None
+            background_geometry = None
             if self.demo:
                 processor.set_background(DemoCamera.background())
             elif background_path.exists():
-                pending_background = cv2.imread(str(background_path), cv2.IMREAD_UNCHANGED)
+                try:
+                    pending_background, background_geometry = load_background(background_path)
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    self.message.emit(f"Hintergrund wird ignoriert: {exc}")
             capture = CaptureManager(self.capture_config, self.output_dir)
             camera = (
                 DemoCamera(self.camera_config) if self.demo else BaumerCamera(self.camera_config)
@@ -132,6 +144,12 @@ class PipelineWorker(QThread):
             self.message.emit(f"Verbunden: {self.camera_identity} · Triggersignal: {monitor}")
             for warning in camera.diagnostics.get("warnings", []):
                 self.message.emit(warning)
+            crop = camera.diagnostics.get("vertical_roi")
+            if crop:
+                self.message.emit(
+                    f"Kamera-Beschnitt: oben {crop['top']} px, unten {crop['bottom']} px."
+                )
+            geometry = None
             frame = None
             detection = None
             frames = 0
@@ -184,6 +202,21 @@ class PipelineWorker(QThread):
                             self.api_capture.cancel("manual_stop")
                         self.message.emit("AutoTune-Versuch aktiv; Einstellungen sind gesperrt.")
                         continue
+                    if name == "timed_recording":
+                        try:
+                            if not self.demo and self.camera_config.mode != "live":
+                                raise RuntimeError(
+                                    "Zeitaufnahme benötigt kontinuierlichen Livebetrieb."
+                                )
+                            capture.metadata = {
+                                "processing": asdict(processor.config),
+                                "camera": dict(camera.diagnostics), "demo": self.demo,
+                            }
+                            capture.start_timed(float(value))
+                            self.message.emit("Zeitaufnahme gestartet: Originalbilder und Winkel.")
+                        except (ValueError, RuntimeError) as exc:
+                            self.message.emit(f"Zeitaufnahme nicht gestartet: {exc}")
+                        continue
                     if name in {
                         "config",
                         "background",
@@ -202,8 +235,7 @@ class PipelineWorker(QThread):
                         processor.set_background(frame.image)
                         self.measurement_epoch += 1
                         if not self.demo:
-                            if not cv2.imwrite(str(background_path), frame.image):
-                                raise OSError("Hintergrund konnte nicht gespeichert werden.")
+                            save_background(background_path, frame.image, geometry)
                         self.message.emit(
                             "Hintergrund aufgenommen. Nur bei leerer Rutsche verwenden."
                         )
@@ -213,6 +245,7 @@ class PipelineWorker(QThread):
                         self.measurement_epoch += 1
                         if background_path.exists() and not self.demo:
                             background_path.unlink()
+                            background_path.with_suffix(".json").unlink(missing_ok=True)
                         self.message.emit(
                             "Hintergrund entfernt; absolute Helligkeitsschwelle aktiv."
                         )
@@ -292,14 +325,28 @@ class PipelineWorker(QThread):
                             }
                     continue
                 frame = current
+                if geometry is None:
+                    geometry = frame_geometry(camera.diagnostics, frame.image)
+                    reference = self.processing_geometry or (crop["base"] if crop else None)
+                    old_roi = processor.config.roi
+                    processor.config.roi = translated_roi(old_roi, reference, geometry)
+                    if old_roi != processor.config.roi:
+                        self.message.emit(
+                            "Software-Messbereich an den Kamera-Bildausschnitt angepasst; "
+                            "bitte prüfen."
+                        )
                 # The camera may use a different resolution than on its last
                 # connection. Keep live acquisition available so the user can
                 # capture a new empty-chute reference instead of disconnecting.
                 if pending_background is not None:
                     background_height, background_width = pending_background.shape[:2]
                     height, width = frame.image.shape[:2]
-                    if (background_height, background_width) == (height, width):
-                        processor.set_background(pending_background)
+                    background = aligned_background(
+                        pending_background, background_geometry,
+                        crop["base"] if crop else geometry, geometry,
+                    )
+                    if background is not None:
+                        processor.set_background(background)
                     else:
                         self.message.emit(
                             f"Gespeicherter Hintergrund ({background_width}×{background_height}) "
@@ -349,6 +396,7 @@ class PipelineWorker(QThread):
                         "image": frame.image,
                         "detection": detection,
                         "config": asdict(processor.config),
+                        "camera_geometry": geometry,
                         "has_background": processor.has_background,
                         "status": status,
                         "fps": fps,

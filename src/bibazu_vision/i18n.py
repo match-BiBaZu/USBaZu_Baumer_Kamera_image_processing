@@ -11,7 +11,103 @@ ENGLISH = {
     "BiBaZu  /  Bildverarbeitung": "BiBaZu  /  Image processing",
     "Kamera verbinden oder Demo starten": "Connect the camera or start the demo",
     "Bauteil: noch kein Bild": "Part: no image yet",
-    "Kontur, OBB und Messachse anzeigen": "Show contour, OBB and measurement axis",
+    "Anzeigen:": "Show:",
+    "History löschen": "Clear history",
+    "History gelöscht. Neue Bilder und Winkel werden ab jetzt gesammelt.": (
+        "History cleared. New images and angles are collected from now on."
+    ),
+    "Kamera: oben abschneiden": "Camera: crop top",
+    "Kamera: unten abschneiden": "Camera: crop bottom",
+    "Kamera-Beschnitt konnte nicht gespeichert werden: {error}": (
+        "Could not save camera crop: {error}"
+    ),
+    "Kamera-Beschnitt konnte nicht wiederhergestellt werden: {error}": (
+        "Could not restore camera crop: {error}"
+    ),
+    "Automatik-Messbereich konnte nicht wiederhergestellt werden: {error}": (
+        "Could not restore automatic-control ROI: {error}"
+    ),
+    "Kamera-Beschnitt lässt zu wenige Bildzeilen übrig ({name}: {target}, Minimum {minimum}).": (
+        "Camera crop leaves too few image rows ({name}: {target}, minimum {minimum})."
+    ),
+    "Kamera-Beschnitt: oben {top} px, unten {bottom} px.": (
+        "Camera crop: top {top} px, bottom {bottom} px."
+    ),
+    "Kamera-Beschnitt muss aus nichtnegativen ganzen Pixelzahlen bestehen.": (
+        "Camera crop values must be nonnegative whole pixel counts."
+    ),
+    "Diese Kamera unterstützt keinen lesbaren vertikalen ROI.": (
+        "This camera does not expose a readable vertical ROI."
+    ),
+    "Kamera-Beschnitt lässt zu wenige Bildzeilen übrig.": (
+        "Camera crop leaves too few image rows."
+    ),
+    "Kamera hat einen unerwarteten vertikalen ROI übernommen.": (
+        "The camera applied an unexpected vertical ROI."
+    ),
+    "Software-Messbereich an den Kamera-Bildausschnitt angepasst; bitte prüfen.": (
+        "Software measurement region adjusted to the camera crop; please check it."
+    ),
+    "Hintergrund wird ignoriert: {error}": "Background ignored: {error}",
+    "Hintergrundbild konnte nicht gelesen werden.": "Could not read background image.",
+    "Hintergrundbild und Bildausschnitt-Metadaten passen nicht zusammen.": (
+        "Background image and crop metadata do not match."
+    ),
+    "Zeitlücke": "Time gap",
+    "Zeitlücke über {milliseconds:g} ms": "Time gap over {milliseconds:g} ms",
+    "OpenCV: {threads} Rechenthread(s).": "OpenCV: {threads} processing thread(s).",
+    "Vorschau & Bildhistorie": "Preview & image history",
+    "Aus": "Off",
+    "Livebild anzeigen": "Live image display",
+    "Bilder für Zeitleiste": "Timeline images",
+    "Alle verfügbaren Vorschaubilder": "All available preview frames",
+    (
+        "Diese Limits betreffen nur Anzeige und temporäre Vorschaubilder. "
+        "Winkelmesswerte und gestartete Originalaufnahmen behalten jedes erfasste Bild. "
+        "Für Flips die Originalaufnahme in der Auswertung prüfen. "
+        "Die Zeitgrenze gilt ab der nächsten Verbindung. "
+        "Fehlende Bild-IDs bleiben unabhängig von der Zeitgrenze markiert."
+    ): (
+        "These limits only affect display and temporary preview images. "
+        "Angle measurements and started original recordings retain every acquired frame. "
+        "Inspect flips in the original recording on the Review page. "
+        "The time limit applies from the next connection. "
+        "Missing frame IDs remain marked regardless of the time limit."
+    ),
+    "Vorschau-Einstellungen konnten nicht gespeichert werden: {error}": (
+        "Could not save preview settings: {error}"
+    ),
+    "1 Minute aufnehmen": "Record 1 minute",
+    (
+        "Zeitaufnahme: 60 Sekunden Originalbilder und Winkel, auch ohne Bewegung. "
+        "Die Bilder werden laufend auf die Festplatte geschrieben. "
+        "Mit Aufzeichnung beenden jederzeit früher stoppen."
+    ): (
+        "Timed recording: 60 seconds of original frames and angles, even without motion. "
+        "Images are written to disk continuously. "
+        "Use Stop recording to finish early at any time."
+    ),
+    "Zeitaufnahme · noch {seconds:.1f} s · {frames} Originalbilder{stale}": (
+        "Timed recording · {seconds:.1f} s remaining · {frames} original frames{stale}"
+    ),
+    "Zeitaufnahme nur bei beendeter, entschärfter Aufzeichnung.": (
+        "Timed recording requires recording to be stopped and disarmed."
+    ),
+    "Zeitaufnahme benötigt kontinuierlichen Livebetrieb.": (
+        "Timed recording requires continuous live acquisition."
+    ),
+    "Zeitaufnahme gestartet: Originalbilder und Winkel.": (
+        "Timed recording started: original frames and angles."
+    ),
+    "Zeitaufnahme nicht gestartet: {error}": "Timed recording not started: {error}",
+    "Zeitaufnahme abgebrochen: Speicherpuffer voll.": (
+        "Timed recording aborted: memory buffer full."
+    ),
+    "Zeitaufnahme abgebrochen: Keine Kamerabilder empfangen.": (
+        "Timed recording aborted: no camera frames received."
+    ),
+    "Kontur": "Contour",
+    "OBB": "OBB",
     "Segmentierung: noch kein Bild": "Segmentation: no image yet",
     "Winkelverlauf der Vorschau · ±90°": "Preview angle history · ±90°",
     "Fortlaufender Achswinkel · Lücken markiert": "Continuous angle history · gaps marked",
