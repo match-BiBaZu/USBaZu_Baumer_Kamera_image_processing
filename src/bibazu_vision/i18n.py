@@ -111,6 +111,11 @@ ENGLISH = {
     "Segmentierung: noch kein Bild": "Segmentation: no image yet",
     "Winkelverlauf der Vorschau · ±90°": "Preview angle history · ±90°",
     "Fortlaufender Achswinkel · Lücken markiert": "Continuous angle history · gaps marked",
+    "Fortlaufender Winkel": "Continuous angle",
+    "Livebild · Messwinkel {raw}": "Live image · Measured angle {raw}",
+    "Historie · t = {seconds:.3f} s · Messwinkel {raw}": (
+        "History · t = {seconds:.3f} s · Measured angle {raw}"
+    ),
     "Historie · t = {seconds:.3f} s · Messwinkel {raw} · Fortlaufend {angle}": (
         "History · t = {seconds:.3f} s · Measured angle {raw} · Continuous {angle}"
     ),

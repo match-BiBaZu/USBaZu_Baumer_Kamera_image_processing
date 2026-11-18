@@ -451,6 +451,7 @@ class MainWindow(QMainWindow):
 
     def build_live_page(self):
         self.live_page, live_layout, sidebar, self.live_sidebar = self.create_page()
+        live_layout.addWidget(QLabel("Fortlaufender Winkel"))
         self.angle_label, self.quality_label, self.rate_label = self.measurement_header(live_layout)
         view_heading = QHBoxLayout()
         self.history_status = QLabel("Livebild")
@@ -1263,6 +1264,8 @@ class MainWindow(QMainWindow):
             return
         self.last_snapshot = snapshot
         self.drain_measurements()
+        if self.history_selection is None:
+            self.show_live_measurement(snapshot)
         status = snapshot["status"]
         state = getattr(status, "state", "?")
         self.timed_button.setEnabled(
@@ -1347,8 +1350,6 @@ class MainWindow(QMainWindow):
         self.last_frame = snapshot["frame_id"]
         detection = snapshot["detection"]
         angle = detection.angle_deg
-        if self.history_selection is None:
-            self.show_live_measurement(snapshot)
         self.show_capture_measurement(snapshot)
         self.ui_text(
             self.rate_label,
@@ -1528,11 +1529,6 @@ class MainWindow(QMainWindow):
             button.setEnabled(False)
         self.show_history_position(sample)
         self.ui_text(
-            self.angle_label,
-            "— ° · Historie" if sample.angle is None else "{angle:+.2f} ° · Historie",
-            **({} if sample.angle is None else {"angle": sample.angle}),
-        )
-        self.ui_text(
             self.quality_label,
             "Kein gültiger Winkel" if sample.angle is None else "Historischer Messwert",
         )
@@ -1550,11 +1546,15 @@ class MainWindow(QMainWindow):
         row = self.trace.measurements.for_preview(sample)
         angle = row.continuous_angle if row is not None else None
         self.ui_text(
+            self.angle_label,
+            "— ° · Historie" if angle is None else "{angle:+.2f} ° · Historie",
+            **({} if angle is None else {"angle": angle}),
+        )
+        self.ui_text(
             self.history_status,
-            "Historie · t = {seconds:.3f} s · Messwinkel {raw} · Fortlaufend {angle}",
+            "Historie · t = {seconds:.3f} s · Messwinkel {raw}",
             seconds=sample.timestamp - self.trace.origin,
             raw="—" if sample.angle is None else f"{sample.angle:+.2f}°",
-            angle="—" if angle is None else f"{angle:+.2f}°",
         )
 
     def history_image_loaded(self, archive, key, image):
@@ -1577,11 +1577,17 @@ class MainWindow(QMainWindow):
 
     def show_live_measurement(self, snapshot):
         detection = snapshot["detection"]
-        angle = detection.angle_deg
+        raw = detection.angle_deg
+        row = self.trace.measurements.for_frame(snapshot["timestamp"], snapshot["frame_id"], raw)
+        angle = row.continuous_angle if row is not None else None
         self.ui_text(
             self.angle_label,
             "— °" if angle is None else "{angle:+.2f} °",
             **({} if angle is None else {"angle": angle}),
+        )
+        self.ui_text(
+            self.history_status, "Livebild · Messwinkel {raw}",
+            raw="—" if raw is None else f"{raw:+.2f}°",
         )
         if detection.center is None:
             self.ui_text(self.quality_label, "Kein Bauteil")

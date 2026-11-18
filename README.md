@@ -299,9 +299,11 @@ Durchlaufaufzeichnung verwenden.
 
 Die Kurve zeigt einen **fortlaufenden Achswinkel**: Übergänge von −90° nach +90°
 werden anhand der kürzesten Achswinkeldifferenz fortgeführt. Ein Flip kann so von
-0° nach −180° verlaufen. Große Winkelanzeige, API und CSV behalten den ursprünglichen
-Messwinkel von −90° bis +90°. Bei einer historischen Auswahl nennt die Kopfzeile
-zusätzlich den fortlaufenden Winkel desselben Vorschauframes, sofern zugeordnet.
+0° nach −180° verlaufen. Die große Winkelanzeige auf der Live-Seite zeigt diesen
+fortlaufenden Winkel, auch bei einer historischen Auswahl. Der ursprüngliche
+Messwinkel von −90° bis +90° steht klein in der Zeile darunter. Beide Werte gehören
+zum selben Kamerabild; fehlt die zugehörige Fortführung, erscheint groß **— °**.
+API, CSV sowie die Aufnahme- und Auswertungsseite behalten den ursprünglichen Messwinkel.
 Die Fortführung ist eine Darstellung anhand zeitlicher Kontinuität und kein
 bestätigter Flipzähler; Messwerte werden weder gemittelt noch ergänzt.
 

@@ -167,8 +167,11 @@ class MeasurementHistory:
         )
 
     def for_preview(self, sample):
-        row = self._by_frame.get((sample.timestamp, sample.frame_id))
-        return row if row is not None and row.raw_angle == sample.angle else None
+        return self.for_frame(sample.timestamp, sample.frame_id, sample.angle)
+
+    def for_frame(self, timestamp, frame_id, raw_angle):
+        row = self._by_frame.get((timestamp, frame_id))
+        return row if row is not None and row.raw_angle == raw_angle else None
 
 
 def envelope_points(rows, start, end, pixels):

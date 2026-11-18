@@ -48,9 +48,9 @@ def presentation_harness(qt_app, tmp_path, monkeypatch):
     )
     image = np.full((64, 96), 150, np.uint8)
 
-    def send(index):
+    def send(index, angle=12):
         nonlocal snapshot
-        detection = Detection(mask=np.zeros_like(image), axis_deg=12, angle_deg=12)
+        detection = Detection(mask=np.zeros_like(image), axis_deg=angle, angle_deg=angle)
         timestamp = origin + index / 200
         worker.api_capture.tick(capture, CameraFrame(image, timestamp, index, False), detection)
         snapshot = {
@@ -82,6 +82,64 @@ def test_display_and_history_limits_preserve_every_measurement(
     assert len(window.trace.measurements) == 200
     assert len(window.worker.api_capture.measurements(0, 8192)["measurements"]) == 200
     assert window.angle_label.text() == "+12.00 °"
+
+
+def test_continuous_angle_is_primary_live_and_in_history_with_matching_raw_angle(
+    presentation_harness,
+):
+    window, send, _, _ = presentation_harness
+    for index, raw in enumerate((0, 45, 89, -89, -45, 0)):
+        send(index, raw)
+    assert window.angle_label.text() == "+180.00 °"
+    assert window.history_status.text() == "Livebild · Messwinkel +0.00°"
+    full_turn_snapshot = window.last_snapshot
+    send(6, None)
+    assert window.angle_label.text() == "— °"
+    assert window.history_status.text() == "Livebild · Messwinkel —"
+    send(7, 10)
+    assert window.angle_label.text() == "+10.00 °"
+    # Match the displayed frame, rather than taking the latest continuous value.
+    window.show_live_measurement(full_turn_snapshot)
+    assert window.angle_label.text() == "+180.00 °"
+    telemetry = window.worker.api_capture.measurements(0, 8192)
+    sample = window.trace.samples[3]
+    window.select_history(sample)
+    assert window.angle_label.text() == "+91.00 ° · Historie"
+    assert "Messwinkel -89.00°" in window.history_status.text()
+    window.set_language("en", persist=False)
+    assert window.angle_label.text() == "+91.00 ° · History"
+    assert "Measured angle -89.00°" in window.history_status.text()
+    window.set_language("de", persist=False)
+    window.return_to_live()
+    assert window.angle_label.text() == "+10.00 °"
+    assert window.history_status.text() == "Livebild · Messwinkel +10.00°"
+    assert window.worker.api_capture.measurements(0, 8192) == telemetry
+    # No substitution with a neighbouring frame if the matching row is missing.
+    window.show_live_measurement({**full_turn_snapshot, "frame_id": 999})
+    assert window.angle_label.text() == "— °"
+    assert window.history_status.text() == "Livebild · Messwinkel +0.00°"
+    window.trace.measurements.expire_before(sample.timestamp + 0.001)
+    window.show_history_position(sample)
+    assert window.angle_label.text() == "— ° · Historie"
+    assert "Messwinkel -89.00°" in window.history_status.text()
+
+
+def test_late_measurement_updates_primary_angle_without_a_new_preview(
+    presentation_harness, monkeypatch,
+):
+    window, send, _, _ = presentation_harness
+    original = window.worker.api_capture.history_measurements
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            window.worker.api_capture, "history_measurements",
+            lambda *args: {"measurements": [], "overflow": False},
+        )
+        send(0, 89)
+    assert window.angle_label.text() == "— °"
+    assert window.worker.api_capture.history_measurements == original
+    window.refresh_live()
+    assert window.angle_label.text() == "+89.00 °"
+    assert len(window.trace.samples) == 1
 
 
 def test_preview_preferences_are_global_and_do_not_replace_native_calibration(
