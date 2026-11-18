@@ -28,6 +28,7 @@ class ApiCapture:
         self.started = 0.0
         self.seen_result = None
         self.cancel_reason = None
+        self.previous_config = None
 
     def busy(self):
         with self.lock:
@@ -45,6 +46,18 @@ class ApiCapture:
                 raise ApiError(409, "Versuchskennung wurde bereits verwendet.")
             if self.active_id:
                 raise ApiError(409, "Ein Versuch läuft bereits.")
+            if request.get("storage_profile") == "review_video_v1":
+                from .review_video import validate_target
+
+                try:
+                    target = validate_target(
+                        request.get("output_directory") or "", request["run_id"], trial_id
+                    )
+                    request = {**request, "output_directory": str(target)}
+                except (OSError, ValueError) as exc:
+                    raise ApiError(422, str(exc)) from exc
+            elif request.get("output_directory") is not None:
+                raise ApiError(422, "Aufnahmeziel benötigt das Profil review_video_v1.")
             record = {**request, "status": "pending", "error": None, "clip_path": None}
             self.trials[trial_id] = record
             if len(self.trials) > 256:
@@ -62,11 +75,28 @@ class ApiCapture:
             if trial_id not in self.trials:
                 raise ApiError(404, "Versuch nicht gefunden.")
             result = copy.deepcopy(self.trials[trial_id])
+        if (
+            result["status"] in TERMINAL
+            and not result["clip_path"]
+            and (result.get("storage_profile") == "review_video_v1")
+        ):
+            from .review_video import recover_pending
+
+            recovered = recover_pending(result["output_directory"])
+            if recovered:
+                result["clip_path"] = str(recovered)
         if result["status"] in TERMINAL and result["clip_path"]:
             # Completed folders are published atomically by the existing writer.
             from pathlib import Path
 
-            manifest = json.loads((Path(result["clip_path"]) / "manifest.json").read_text("utf-8"))
+            from .review_video import finalize_pending
+
+            path = finalize_pending(result["clip_path"])
+            result["clip_path"] = str(path)
+            with self.lock:
+                self.trials[trial_id]["clip_path"] = str(path)
+
+            manifest = json.loads((Path(path) / "manifest.json").read_text("utf-8"))
             result["manifest"] = manifest
             result["measurements"] = [
                 {
@@ -122,13 +152,24 @@ class ApiCapture:
                 self.started = time.monotonic()
                 self.seen_result = capture.completed_clips[-1] if capture.completed_clips else None
                 if request.get("capture_config"):
+                    if (
+                        request.get("start_mode") is not None
+                        or request.get("presence_confirm_seconds") is not None
+                    ):
+                        self.previous_config = capture.config
                     capture.configure(CaptureConfig(**request["capture_config"]))
                     self.worker.capture_config = capture.config
+                    record["capture_config"] = dict(vars(capture.config))
+                if request.get("storage_profile") == "review_video_v1":
+                    from pathlib import Path
+
+                    capture.review_target = Path(request["output_directory"])
                 capture.arm(single_shot=True)
                 record.update(status="armed", start_mode=capture.config.start_mode)
             except Exception as exc:
                 record.update(status="failed", error=str(exc))
                 self.active_id = None
+                capture.review_target = None
 
     def metadata(self):
         with self.lock:
@@ -208,6 +249,12 @@ class ApiCapture:
             elif self.cancel_reason and state == "idle" and not status.writer_pending:
                 record.update(status="aborted", error=self.cancel_reason)
                 self.active_id = None
+            if self.active_id is None and self.previous_config is not None:
+                capture.configure(self.previous_config)
+                self.worker.capture_config = self.previous_config
+                self.previous_config = None
+            if self.active_id is None:
+                capture.review_target = None
 
     def shutdown(self, reason):
         with self.lock:

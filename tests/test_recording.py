@@ -57,6 +57,51 @@ def test_hardware_requires_trigger_and_waits_for_visible_motion(managers):
     assert manager.poll(0.22).state == "armed"
 
 
+@pytest.mark.parametrize("angle", [0.0, None])
+def test_presence_records_separate_passage_without_motion_or_valid_angle(managers, angle):
+    manager = managers(start_mode="presence", pre_roll_seconds=0)
+    for attempt in range(2):
+        start = attempt * 2.0
+        manager.arm(single_shot=True)
+        assert (
+            manager.ingest(
+                frame(), start, attempt * 20, detection(present=False, motion=0, angle=None)
+            ).state
+            == "armed"
+        )
+        for index in range(6):
+            manager.ingest(
+                frame(100),
+                start + 0.1 + index * 0.05,
+                attempt * 20 + index + 1,
+                detection(present=True, motion=0, angle=angle),
+            )
+        manager.ingest(
+            frame(), start + 0.4, attempt * 20 + 7, detection(present=False, motion=0, angle=None)
+        )
+        manager.ingest(
+            frame(), start + 0.55, attempt * 20 + 8, detection(present=False, motion=0, angle=None)
+        )
+        clip = saved(manager)
+        assert clip.manifest["stop_reason"] == "part_left"
+        assert clip.manifest["trigger_source"] == "presence"
+        assert not clip.manifest["motion_seen"]
+        assert manager.poll(start + 0.6).state == "idle"
+        assert len(manager.completed_clips) == attempt + 1
+
+
+def test_presence_requires_full_absence_quiet_time_even_after_motion(managers):
+    manager = managers(start_mode="presence", pre_roll_seconds=0, quiet_seconds=0.1)
+    manager.arm(single_shot=True)
+    manager.ingest(frame(), 0.0, 1, detection(motion=0.02))
+    manager.ingest(frame(), 0.2, 2, detection(motion=0))
+    assert manager.ingest(frame(), 0.3, 3, detection(present=False, motion=0)).state != "idle"
+    manager.ingest(frame(), 0.35, 4, detection(motion=0))
+    manager.ingest(frame(), 0.4, 5, detection(present=False, motion=0))
+    manager.ingest(frame(), 0.55, 6, detection(present=False, motion=0))
+    assert saved(manager).manifest["end_timestamp"] == 0.55
+
+
 def test_wait_timeout_without_frames_is_saved_and_never_claims_a_passage(managers):
     manager = managers(start_mode="hardware")
     assert manager.trigger(1.0).state == "waiting"
@@ -295,8 +340,11 @@ def wait_for_writer(predicate):
 
 def test_timed_minute_streams_every_original_beyond_ram_budget_and_ignores_passage_end(managers):
     manager = managers(
-        start_mode="hardware", max_seconds=0.5, wait_seconds=0.1,
-        max_memory_mb=0.002, pre_roll_seconds=0,
+        start_mode="hardware",
+        max_seconds=0.5,
+        wait_seconds=0.1,
+        max_memory_mb=0.002,
+        pre_roll_seconds=0,
     )
     original_config = manager.config
     status = manager.start_timed(60, now=10)
@@ -304,7 +352,10 @@ def test_timed_minute_streams_every_original_beyond_ram_budget_and_ignores_passa
     for index in range(60):
         pixels = frame(index)
         status = manager.ingest(
-            pixels, 10 + index, index, detection(present=index % 2 == 0, motion=0, angle=index),
+            pixels,
+            10 + index,
+            index,
+            detection(present=index % 2 == 0, motion=0, angle=index),
             triggered=True,
         )
         pixels[:] = 255

@@ -226,7 +226,8 @@ class MainWindow(QMainWindow):
         self.build_ui()
         self._register_texts()
         self.ui_text(
-            self.reference_label, "0°-Offset: {offset:.2f}°",
+            self.reference_label,
+            "0°-Offset: {offset:.2f}°",
             offset=self.profile["processing"]["zero_offset_deg"],
         )
         self.set_language(self.language, persist=language is not None)
@@ -693,7 +694,8 @@ class MainWindow(QMainWindow):
 
     def camera_crop_changed(self, *_):
         self.camera_roi_settings[self.selected_camera] = {
-            "crop_top": self.crop_top.value(), "crop_bottom": self.crop_bottom.value(),
+            "crop_top": self.crop_top.value(),
+            "crop_bottom": self.crop_bottom.value(),
         }
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -935,7 +937,8 @@ class MainWindow(QMainWindow):
             },
             "processing": asdict(self.processing_config()),
             "processing_geometry": (
-                self.last_snapshot.get("camera_geometry") if self.last_snapshot
+                self.last_snapshot.get("camera_geometry")
+                if self.last_snapshot
                 else self.profile.get("processing_geometry")
             ),
         }
@@ -952,11 +955,15 @@ class MainWindow(QMainWindow):
         processing = self.profile["processing"]
         capture = self.profile["capture"]
         values = [
-            (self.cti, self.profile["cti"]), (self.serial, self.profile["serial"]),
-            (self.exposure, self.profile["exposure"]), (self.fps, self.profile["fps"]),
-            (self.threshold, processing["threshold"]), (self.area, processing["min_area"]),
+            (self.cti, self.profile["cti"]),
+            (self.serial, self.profile["serial"]),
+            (self.exposure, self.profile["exposure"]),
+            (self.fps, self.profile["fps"]),
+            (self.threshold, processing["threshold"]),
+            (self.area, processing["min_area"]),
             (self.chute_angle, processing["chute_angle_deg"]),
-            (self.quiet, capture["quiet_seconds"]), (self.max_duration, capture["max_seconds"]),
+            (self.quiet, capture["quiet_seconds"]),
+            (self.max_duration, capture["max_seconds"]),
             (self.memory, capture["max_memory_mb"]),
             (self.motion_percent, capture["motion_threshold"] * 100),
         ]
@@ -967,9 +974,12 @@ class MainWindow(QMainWindow):
                 else:
                     widget.setValue(value)
         for widget, value in [
-            (self.camera_mode, camera["mode"]), (self.line, camera["trigger_line"]),
-            (self.edge, camera["trigger_activation"]), (self.method, processing["method"]),
-            (self.foreground, processing["foreground"]), (self.scale, processing["scale"]),
+            (self.camera_mode, camera["mode"]),
+            (self.line, camera["trigger_line"]),
+            (self.edge, camera["trigger_activation"]),
+            (self.method, processing["method"]),
+            (self.foreground, processing["foreground"]),
+            (self.scale, processing["scale"]),
             (self.start_mode, capture["start_mode"]),
         ]:
             with QSignalBlocker(widget):
@@ -978,7 +988,8 @@ class MainWindow(QMainWindow):
         with QSignalBlocker(self.ignore_border_touch):
             self.ignore_border_touch.setChecked(processing["ignore_border_touch"])
         self.ui_text(
-            self.reference_label, "0°-Offset: {offset:.2f}°",
+            self.reference_label,
+            "0°-Offset: {offset:.2f}°",
             offset=processing["zero_offset_deg"],
         )
 
@@ -1015,8 +1026,13 @@ class MainWindow(QMainWindow):
 
     def set_connection_controls(self, enabled):
         for widget in (
-            self.camera_selector, self.cti, self.serial, self.cti_button,
-            self.crop_top, self.crop_bottom, self.gap_ms,
+            self.camera_selector,
+            self.cti,
+            self.serial,
+            self.cti_button,
+            self.crop_top,
+            self.crop_bottom,
+            self.gap_ms,
         ):
             widget.setEnabled(enabled)
 
@@ -1079,7 +1095,8 @@ class MainWindow(QMainWindow):
             (ProcessingConfig(chute_angle_deg=2.86) if demo else self.processing_config()),
             self.capture_config(),
             (
-                self.data_dir / "demo" if demo
+                self.data_dir / "demo"
+                if demo
                 else camera_data_dir(self.data_dir, self.selected_camera)
             ),
             demo,
@@ -1102,9 +1119,7 @@ class MainWindow(QMainWindow):
         self.output_button.setEnabled(False)
         self._connection_pending = True
         self.set_connection_controls(False)
-        self.ui_text(
-            self.state_label, "Verbinde Demo …" if demo else "Verbinde Baumer-Kamera …"
-        )
+        self.ui_text(self.state_label, "Verbinde Demo …" if demo else "Verbinde Baumer-Kamera …")
         self.ui_text(self.connection_label, "Verbinde …")
         self.start_history()
         self.worker.start()
@@ -1257,7 +1272,8 @@ class MainWindow(QMainWindow):
                 self.ui_text(self.connection_label, "Demo verbunden")
             else:
                 self.ui_text(
-                    self.connection_label, "Verbunden: {camera}",
+                    self.connection_label,
+                    "Verbunden: {camera}",
                     camera=getattr(self.worker, "camera_identity", "Baumer"),
                 )
         if snapshot is None:
@@ -1269,7 +1285,8 @@ class MainWindow(QMainWindow):
         status = snapshot["status"]
         state = getattr(status, "state", "?")
         self.timed_button.setEnabled(
-            state == "idle" and not self.worker.api_capture.busy()
+            state == "idle"
+            and not self.worker.api_capture.busy()
             and (self.worker.demo or self.camera_mode.currentData() == "live")
         )
         timed_active = getattr(status, "timed_active", False)
@@ -1364,14 +1381,20 @@ class MainWindow(QMainWindow):
         timestamp = snapshot["timestamp"]
         display_fps = self.preview_fps.currentData()
         history_fps = self.history_fps.currentData()
-        display_due = display_fps > 0 and (
-            self._last_display_timestamp is None
-            or timestamp - self._last_display_timestamp >= 1 / display_fps - 1e-9
-        ) and (page is self.capture_page or (
-            page is self.live_page and self.history_selection is None
-        ))
+        display_due = (
+            display_fps > 0
+            and (
+                self._last_display_timestamp is None
+                or timestamp - self._last_display_timestamp >= 1 / display_fps - 1e-9
+            )
+            and (
+                page is self.capture_page
+                or (page is self.live_page and self.history_selection is None)
+            )
+        )
         archive_due = history_fps >= 0 and (
-            history_fps == 0 or self._last_archive_timestamp is None
+            history_fps == 0
+            or self._last_archive_timestamp is None
             or timestamp - self._last_archive_timestamp >= 1 / history_fps - 1e-9
         )
         if display_due or archive_due:
@@ -1403,9 +1426,12 @@ class MainWindow(QMainWindow):
         if key != self._preview_cache_key:
             self._preview_cache_image = (
                 render_overlay(
-                    snapshot["image"], snapshot["detection"],
+                    snapshot["image"],
+                    snapshot["detection"],
                     ProcessingConfig(**snapshot["config"]),
-                    show_contour=show_contour, show_obb=show_obb, show_axis=show_axis,
+                    show_contour=show_contour,
+                    show_obb=show_obb,
+                    show_axis=show_axis,
                 )
                 if show_contour or show_obb or show_axis
                 else snapshot["image"]
@@ -1586,7 +1612,8 @@ class MainWindow(QMainWindow):
             **({} if angle is None else {"angle": angle}),
         )
         self.ui_text(
-            self.history_status, "Livebild · Messwinkel {raw}",
+            self.history_status,
+            "Livebild · Messwinkel {raw}",
             raw="—" if raw is None else f"{raw:+.2f}°",
         )
         if detection.center is None:
@@ -1644,13 +1671,28 @@ class MainWindow(QMainWindow):
     def open_clip(self, path):
         self.play_timer.stop()
         try:
+            if self.clip is not None and hasattr(self.clip.frames, "close"):
+                self.clip.frames.close()
             self.clip = load_clip(path)
             if not len(self.clip.frames):
-                raise ValueError("Durchlauf enthält keine Bilder.")
+                if self.clip.manifest.get("schema_version") != 2:
+                    raise ValueError("Durchlauf enthält keine Bilder.")
+                self.slider.setRange(0, 0)
+                self.slider.setEnabled(False)
+                self.play_button.setEnabled(False)
+                self.review_view.source = None
+                self.review_view.clear()
+                self.review_view.setText(
+                    "Prüfvideo nicht verfügbar; Messwerte bleiben exportierbar."
+                )
+                self.tabs.setCurrentWidget(self.review_page)
+                return
         except Exception as exc:
             self.note(f"Durchlauf konnte nicht geladen werden: {exc}")
             return
         self.slider.setRange(0, len(self.clip.frames) - 1)
+        self.slider.setEnabled(True)
+        self.play_button.setEnabled(True)
         self.slider.setValue(0)
         self.review_position = 0.0
         self.show_review(0)
@@ -1661,17 +1703,28 @@ class MainWindow(QMainWindow):
         image = self.clip.frames[index]
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image.copy()
         measurement = self.clip.measurements[index]
+        media = self.clip.manifest.get("media", {})
+        crop = media.get("crop_xywh", [0, 0, 0, 0])
+        scale = media.get("scale_xy", [1, 1])
+
+        def point(x, y):
+            return int((x - crop[0]) * scale[0]), int((y - crop[1]) * scale[1])
+
         box = measurement.get("box")
         if box is not None:
-            cv2.polylines(image, [np.asarray(box, dtype=np.int32)], True, (0, 220, 100), 2)
+            cv2.polylines(
+                image,
+                [np.asarray([point(x, y) for x, y in box], dtype=np.int32)],
+                True,
+                (0, 220, 100),
+                2,
+            )
         center = measurement.get("center")
         axis = measurement.get("axis_deg")
         if center is not None and axis is not None:
             x, y = center
             dx, dy = 70 * math.cos(math.radians(axis)), -70 * math.sin(math.radians(axis))
-            cv2.line(
-                image, (int(x - dx), int(y - dy)), (int(x + dx), int(y + dy)), (255, 190, 0), 2
-            )
+            cv2.line(image, point(x - dx, y - dy), point(x + dx, y + dy), (255, 190, 0), 2)
         angle = measurement.get("angle_deg")
         cv2.putText(
             image,
@@ -1690,7 +1743,17 @@ class MainWindow(QMainWindow):
         self.review_index = index
         if not self.play_timer.isActive():
             self.review_position = self.clip.timestamps[index] - self.clip.timestamps[0]
-        self.review_view.set_image(self.review_image(index))
+        try:
+            self.review_view.set_image(self.review_image(index))
+        except (OSError, ValueError, IndexError) as exc:
+            self.play_timer.stop()
+            self.slider.setEnabled(False)
+            self.play_button.setEnabled(False)
+            self.review_view.source = None
+            self.review_view.clear()
+            self.review_view.setText("Prüfvideo nicht mehr verfügbar; Messwerte bleiben erhalten.")
+            self.note(str(exc))
+            return
         measurement = self.clip.measurements[index]
         angle = measurement.get("angle_deg")
         self.ui_text(
@@ -1769,10 +1832,7 @@ class MainWindow(QMainWindow):
             return True
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
-            if (
-                self.worker is not None and not self.worker.demo
-                and not self.worker.isRunning()
-            ):
+            if self.worker is not None and not self.worker.demo and not self.worker.isRunning():
                 snapshot = self.worker.snapshot()
                 if snapshot is not None:
                     self.last_snapshot = snapshot
@@ -1824,7 +1884,8 @@ def main():
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     parser.add_argument("--language", choices=("de", "en"), help="Sprache: Deutsch / Englisch")
     parser.add_argument(
-        "--opencv-threads", type=int,
+        "--opencv-threads",
+        type=int,
         help="OpenCV-Rechenthreads (Standard: 4; alternativ BIBAZU_OPENCV_THREADS)",
     )
     args = parser.parse_args()

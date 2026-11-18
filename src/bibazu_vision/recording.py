@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,10 +36,11 @@ class CaptureConfig:
     max_memory_mb: float = 256.0
     start_mode: str = "motion"
     writer_queue_depth: int = 3
+    presence_confirm_seconds: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.start_mode not in {"motion", "hardware", "manual"}:
-            raise ValueError("start_mode must be motion, hardware or manual")
+        if self.start_mode not in {"motion", "presence", "hardware", "manual"}:
+            raise ValueError("start_mode must be motion, presence, hardware or manual")
         for name in ("quiet_seconds", "wait_seconds", "max_seconds", "max_memory_mb"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
@@ -49,6 +51,16 @@ class CaptureConfig:
             raise ValueError("motion_threshold must be between 0 and 1")
         if self.writer_queue_depth < 1:
             raise ValueError("writer_queue_depth must be positive")
+        if not math.isfinite(self.presence_confirm_seconds) or not (
+            self.presence_confirm_seconds == 0 or 0.05 <= self.presence_confirm_seconds <= 0.5
+        ):
+            raise ValueError("presence_confirm_seconds must be 0 or between 0.05 and 0.5")
+        if self.start_mode == "presence" and self.presence_confirm_seconds:
+            object.__setattr__(
+                self,
+                "pre_roll_seconds",
+                max(self.pre_roll_seconds, self.presence_confirm_seconds + 0.05),
+            )
 
 
 @dataclass(frozen=True)
@@ -78,7 +90,7 @@ class ClipSaveResult:
 @dataclass
 class Clip:
     path: Path
-    frames: list[np.ndarray]
+    frames: Sequence[np.ndarray]
     timestamps: list[float]
     frame_ids: list[int | str | None]
     measurements: list[dict[str, Any]]
@@ -118,6 +130,8 @@ class _Capture:
     motion_seen: bool = False
     last_motion: float | None = None
     last_present: bool = False
+    presence_seen: bool = False
+    absent_since: float | None = None
     dropped_frames: int = 0
     pre_roll_truncated_frames: int = 0
     end: float | None = None
@@ -126,6 +140,7 @@ class _Capture:
     duration_seconds: float | None = None
     accepted_frames: int = 0
     written_frames: int = 0
+    review_target: Path | None = None
 
 
 def _get(value: Any, name: str, default: Any = None) -> Any:
@@ -192,9 +207,10 @@ class CaptureManager:
     """Capture one passage at a time without performing disk IO in ingest.
 
     `arm()` enables automatic starts. `trigger()` starts a manual/hardware wait
-    (and arms if needed). A passage finishes only after a part has moved, then
-    disappeared and motion has stayed quiet. A stationary visible part therefore
-    ends at the explicit duration cap, never as a successful passage.
+    (and arms if needed). Presence mode records appearance through disappearance,
+    even without rotation or a motion signal. Other modes require visible motion
+    before departure. A part that remains visible ends at the explicit duration
+    cap, never as a successful passage.
     """
 
     _FRAME_OVERHEAD = 512
@@ -203,6 +219,7 @@ class CaptureManager:
         self.config = config
         self.output_dir = Path(output_dir)
         self.metadata: dict[str, Any] = {}
+        self.review_target: Path | None = None
         self.last_clip_path: Path | None = None
         self.completed_clips: deque[ClipSaveResult] = deque(maxlen=64)
         self._lock = threading.RLock()
@@ -220,6 +237,7 @@ class CaptureManager:
         self._dropped_frames = 0
         self._rejected_triggers = 0
         self._pre_roll_truncated = 0
+        self._presence_candidate = None
         self._last_timestamp: float | None = None
         self._last_shape: tuple[int, ...] | None = None
         self._reason: str | None = None
@@ -239,7 +257,8 @@ class CaptureManager:
     def _status(self) -> CaptureStatus:
         if self._active is not None:
             state = (
-                "moving" if self._active.motion_seen or self._active.duration_seconds is not None
+                "moving"
+                if self._active.motion_seen or self._active.duration_seconds is not None
                 else "waiting"
             )
         elif self._pending:
@@ -258,9 +277,14 @@ class CaptureManager:
             self._rejected_triggers,
             timed,
             self._active.accepted_frames if timed else 0,
-            max(0.0, self._active.start + self._active.duration_seconds
-                - max(self._active.start, self._last_timestamp or self._active.start))
-            if timed else None,
+            max(
+                0.0,
+                self._active.start
+                + self._active.duration_seconds
+                - max(self._active.start, self._last_timestamp or self._active.start),
+            )
+            if timed
+            else None,
         )
 
     def start_timed(self, duration_seconds: float = 60, now: float | None = None) -> CaptureStatus:
@@ -295,6 +319,7 @@ class CaptureManager:
                 return self._status()
             self._armed = True
             self._single_shot = single_shot
+            self._presence_candidate = None
             self._reason = None
             self._error = None
             return self._status()
@@ -309,6 +334,7 @@ class CaptureManager:
                 raise ValueError("writer_queue_depth cannot change after construction")
             self._clear_pre_roll()
             self._pre_roll_truncated = 0
+            self._presence_candidate = None
             self.config = config
             self._reason = None
             return self._status()
@@ -316,6 +342,7 @@ class CaptureManager:
     def disarm(self) -> CaptureStatus:
         with self._lock:
             self._armed = False
+            self._presence_candidate = None
             if self._active is not None:
                 self._finish("manual_stop", self._last_timestamp or self._active.start)
             self._clear_pre_roll()
@@ -334,10 +361,66 @@ class CaptureManager:
         """Stop an externally owned capture and preserve its aborted manifest."""
         with self._lock:
             self._armed = False
+            self._presence_candidate = None
             if self._active is not None:
                 self._finish(reason, self._last_timestamp or self._active.start, aborted=True)
             self._clear_pre_roll()
             return self._status()
+
+    def _qualified_presence(self, stamp, measurement):
+        """Require persistent, measurable geometry; never claim semantic part recognition."""
+        if not self.config.presence_confirm_seconds:
+            return measurement["present"]
+        angle, confidence = measurement.get("angle_deg"), measurement.get("confidence")
+        box, area = measurement.get("box"), measurement.get("area")
+        if (
+            not measurement["present"]
+            or measurement.get("touching_border")
+            or type(angle) not in (int, float)
+            or type(confidence) not in (int, float)
+            or confidence < 0.2
+            or box is None
+            or type(area) not in (int, float)
+            or area <= 0
+        ):
+            self._presence_candidate = None
+            return False
+        sides = sorted(float(np.linalg.norm(np.subtract(box[i + 1], box[i]))) for i in (0, 1))
+        geometry = (area, *sides)
+        if min(geometry) <= 0:
+            self._presence_candidate = None
+            return False
+        candidate = self._presence_candidate
+        offset = (angle - candidate["angle"] + 90) % 180 - 90 if candidate else 0.0
+        if candidate and (
+            not 0 < stamp - candidate["last"] <= 0.05 + 1e-9
+            or any(
+                abs(value / reference - 1) > 0.25
+                for value, reference in zip(geometry, candidate["geometry"], strict=True)
+            )
+            or max(candidate["high"], offset) - min(candidate["low"], offset) > 5.0 + 1e-9
+        ):
+            candidate = None
+        if candidate is None:
+            self._presence_candidate = {
+                "start": stamp,
+                "last": stamp,
+                "count": 1,
+                "angle": angle,
+                "low": 0.0,
+                "high": 0.0,
+                "geometry": geometry,
+            }
+            return False
+        candidate.update(
+            last=stamp,
+            count=candidate["count"] + 1,
+            low=min(candidate["low"], offset),
+            high=max(candidate["high"], offset),
+        )
+        return candidate["count"] >= 3 and stamp - candidate["start"] >= (
+            self.config.presence_confirm_seconds - 1e-9
+        )
 
     def ingest(
         self,
@@ -370,10 +453,12 @@ class CaptureManager:
                 if self._active is not None:
                     self._finish("timestamp_reset", self._last_timestamp, aborted=True)
                 self._clear_pre_roll()
+                self._presence_candidate = None
             if self._last_shape is not None and image.shape != self._last_shape:
                 if self._active is not None:
                     self._finish("image_shape_changed", timestamp, aborted=True)
                 self._clear_pre_roll()
+                self._presence_candidate = None
             self._last_timestamp = timestamp
             self._last_shape = image.shape
             self._trim_pre_roll(timestamp)
@@ -386,10 +471,20 @@ class CaptureManager:
             if not timed and triggered and self.config.start_mode == "hardware":
                 self._begin(timestamp, "hardware")
             elif (
-                not timed and self.config.start_mode == "motion" and moving
-                and present and self._active is None
+                not timed
+                and self.config.start_mode == "motion"
+                and moving
+                and present
+                and self._active is None
             ):
                 self._begin(timestamp, "motion")
+            elif (
+                not timed
+                and self.config.start_mode == "presence"
+                and self._active is None
+                and self._qualified_presence(timestamp, measurement)
+            ):
+                self._begin(timestamp, "presence")
             if self._active is not None:
                 if not self._append_frame(image, timestamp, frame_id, measurement, active=True):
                     self._active.dropped_frames += 1
@@ -400,6 +495,11 @@ class CaptureManager:
                     return self._status()
                 capture = self._active
                 capture.last_present = present
+                if present:
+                    capture.presence_seen = True
+                    capture.absent_since = None
+                elif capture.absent_since is None:
+                    capture.absent_since = timestamp
                 if moving:
                     capture.last_motion = timestamp
                     if present:
@@ -460,10 +560,14 @@ class CaptureManager:
             frames=deque(self._pre_roll),
             pre_roll_truncated_frames=self._pre_roll_truncated,
             accepted_frames=len(self._pre_roll),
+            review_target=self.review_target,
         )
         self._pre_roll.clear()
         self._pre_roll_truncated = 0
         self._reason = None
+        if self._active.review_target is not None:
+            self._pending += 1
+            self._jobs.put_nowait(self._active)
         return True
 
     def _append_frame(
@@ -494,7 +598,7 @@ class CaptureManager:
             assert self._active is not None
             self._active.frames.append(frame)
             self._active.accepted_frames += 1
-            if self._active.duration_seconds is not None:
+            if self._active.duration_seconds is not None or self._active.review_target is not None:
                 self._saved.notify_all()
         else:
             self._pre_roll.append(frame)
@@ -528,10 +632,22 @@ class CaptureManager:
                     )
         elif now - capture.start >= self.config.max_seconds:
             self._finish("max_duration", now)
-        elif not capture.motion_seen and now - capture.start >= self.config.wait_seconds:
+        elif (
+            self.config.start_mode == "presence"
+            and capture.presence_seen
+            and capture.absent_since is not None
+            and now - capture.absent_since >= self.config.quiet_seconds
+        ):
+            self._finish("part_left", now)
+        elif (
+            self.config.start_mode != "presence"
+            and not capture.motion_seen
+            and now - capture.start >= self.config.wait_seconds
+        ):
             self._finish("no_motion_timeout", now)
         elif (
-            capture.motion_seen
+            self.config.start_mode != "presence"
+            and capture.motion_seen
             and not capture.last_present
             and capture.last_motion is not None
             and now - capture.last_motion >= self.config.quiet_seconds
@@ -548,7 +664,7 @@ class CaptureManager:
         self._reason = reason
         if self._single_shot:
             self._armed = False
-        if capture.duration_seconds is not None:
+        if capture.duration_seconds is not None or capture.review_target is not None:
             self._saved.notify_all()
             return
         self._pending += 1
@@ -569,6 +685,10 @@ class CaptureManager:
                 path = self._persist(capture)
             except Exception as exc:  # Surface filesystem errors to the camera worker.
                 error = f"{type(exc).__name__}: {exc}"
+                if capture.review_target is not None:
+                    from .review_video import recover_pending
+
+                    path = recover_pending(capture.review_target)
             with self._saved:
                 if error is not None and self._active is capture:
                     # A streaming writer can fail while acquisition is active.
@@ -597,6 +717,10 @@ class CaptureManager:
             self._jobs.task_done()
 
     def _persist(self, capture: _Capture) -> Path:
+        if capture.review_target is not None:
+            from .review_video import persist_video
+
+            return persist_video(self, capture)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         utc_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
         name = f"session_{utc_stamp}_{uuid.uuid4().hex[:8]}"
@@ -714,23 +838,28 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def load_clip(path: str | Path) -> Clip:
-    """Load lossless originals as read-only memory maps; overlays stay editable."""
+    """Load legacy originals or lazy compact video; preserve original measurement coordinates."""
     source = Path(path)
     directory = source.parent if source.name == "manifest.json" else source
     directory = directory.resolve()
     with (directory / "manifest.json").open(encoding="utf-8") as stream:
         manifest = json.load(stream)
-    if manifest.get("schema_version") != 1:
+    if manifest.get("schema_version") not in (1, 2):
         raise ValueError("unsupported clip schema version")
     frames, timestamps, frame_ids, measurements = [], [], [], []
+    if manifest["schema_version"] == 2:
+        from .review_video import VideoFrames
+
+        frames = VideoFrames(directory, manifest)
     for row in manifest.get("frames", []):
-        frame_path = (directory / row["file"]).resolve()
-        if not frame_path.is_relative_to(directory):
-            raise ValueError("clip frame path escapes session directory")
-        frames.append(np.load(frame_path, mmap_mode="r", allow_pickle=False))
+        if manifest["schema_version"] == 1:
+            frame_path = (directory / row["file"]).resolve()
+            if not frame_path.is_relative_to(directory):
+                raise ValueError("clip frame path escapes session directory")
+            frames.append(np.load(frame_path, mmap_mode="r", allow_pickle=False))
         timestamps.append(float(row["timestamp"]))
         frame_ids.append(row.get("frame_id"))
         measurements.append(row.get("measurement", {}))
-    if len(frames) != manifest.get("frame_count"):
+    if len(timestamps) != manifest.get("frame_count"):
         raise ValueError("clip frame count does not match manifest")
     return Clip(directory, frames, timestamps, frame_ids, measurements, manifest)

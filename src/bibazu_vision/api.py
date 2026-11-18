@@ -25,6 +25,10 @@ class TrialRequest(StrictModel):
     trial_id: Annotated[str, Field(min_length=1, max_length=128)]
     context: dict = Field(default_factory=dict)
     timeout_seconds: Annotated[float, Field(ge=1, le=3600)] = 60.0
+    start_mode: Literal["presence", "motion", "hardware", "manual"] | None = None
+    storage_profile: Literal["review_video_v1"] | None = None
+    output_directory: str | None = None
+    presence_confirm_seconds: Annotated[float, Field(ge=0.05, le=0.5)] | None = None
 
 
 class Measurement(BaseModel):
@@ -94,7 +98,11 @@ class VisionApi(QObject):
             "api_version": 1,
             "single_shot": True,
             "measurement_capacity": 8192,
-            "start_modes": ["motion", "hardware", "manual"],
+            "start_modes": ["motion", "hardware", "manual", "presence"],
+            "trial_start_mode_override": True,
+            "review_video_v1": True,
+            "direct_trial_output": True,
+            "qualified_presence_start": True,
             "angle_semantics": "image_plane_axis_modulo_180_degrees",
         }
 
@@ -141,6 +149,14 @@ class VisionApi(QObject):
                     if hasattr(self.window, "capture_config")
                     else asdict(worker.capture_config)
                 )
+                if body.start_mode is not None:
+                    request["capture_config"]["start_mode"] = body.start_mode
+                if body.presence_confirm_seconds is not None:
+                    if request["capture_config"]["start_mode"] != "presence":
+                        raise ApiError(422, "Bauteilbestätigung benötigt den Startmodus presence.")
+                    request["capture_config"]["presence_confirm_seconds"] = (
+                        body.presence_confirm_seconds
+                    )
                 result = worker.api_capture.create(request, self.lease, x_session_id)
                 self.trial_sources[body.trial_id] = worker.api_capture
                 if len(self.trial_sources) > 256:

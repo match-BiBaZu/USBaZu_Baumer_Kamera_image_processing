@@ -170,6 +170,161 @@ def test_trial_single_shot_ids_full_measurements_and_locked_reference(harness, m
     assert request("GET", "trials/missing").status_code == 404
 
 
+def test_presence_override_records_two_unrotated_parts_without_hardware_trigger(harness):
+    start, wait = harness
+    worker, camera, api, request, headers = start("hardware")
+    assert request("GET", "capabilities").json()["trial_start_mode_override"]
+    for attempt in range(2):
+        trial_id = f"presence-{attempt}"
+        response = request(
+            "POST",
+            "trials",
+            json={
+                "run_id": "r",
+                "trial_id": trial_id,
+                "start_mode": "presence",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 202
+        wait(lambda key=trial_id: worker.api_capture.trials[key]["status"] == "armed")
+        for _ in range(4):
+            camera.send_frame(x=20)
+        wait(lambda: worker.snapshot()["status"].state in {"waiting", "moving"})
+        blank(camera)
+        time.sleep(0.06)
+        blank(camera)
+        wait(lambda: not worker.api_capture.busy())
+        result = request("GET", "trials/" + trial_id).json()
+        assert result["status"] == "completed"
+        assert result["manifest"]["trigger_source"] == "presence"
+        assert result["manifest"]["capture_config"]["start_mode"] == "presence"
+        assert worker.capture_config.start_mode == "hardware"
+        assert result["manifest"]["metadata"]["trial_id"] == trial_id
+
+
+def test_qualified_presence_ignores_intrusion_and_restores_config_after_trial(harness):
+    start, wait = harness
+    worker, camera, api, request, headers = start("hardware")
+    original = worker.capture_config
+    assert request("GET", "capabilities").json()["qualified_presence_start"]
+    response = request(
+        "POST",
+        "trials",
+        headers=headers,
+        json={
+            "run_id": "r",
+            "trial_id": "qualified",
+            "start_mode": "presence",
+            "presence_confirm_seconds": 0.1,
+        },
+    )
+    assert response.status_code == 202, response.text
+    wait(lambda: worker.api_capture.trials["qualified"]["status"] == "armed")
+    assert worker.capture_config.pre_roll_seconds >= 0.15
+    camera.send_frame(x=20)
+    wait(lambda: worker.snapshot()["detection"].angle_deg is not None)
+    blank(camera)
+    wait(lambda: worker.snapshot()["detection"].angle_deg is None)
+    assert request("GET", "trials/qualified").json()["status"] == "armed"
+    assert worker.snapshot()["last_clip"] is None
+    for _ in range(8):
+        camera.send_frame(x=20)
+        time.sleep(0.02)
+    wait(lambda: worker.api_capture.trials["qualified"]["status"] == "recording")
+    blank(camera)
+    time.sleep(0.06)
+    blank(camera)
+    wait(lambda: not worker.api_capture.busy())
+    result = request("GET", "trials/qualified").json()
+    assert result["status"] == "completed"
+    assert result["manifest"]["capture_config"]["presence_confirm_seconds"] == 0.1
+    assert worker.capture_config == original
+
+
+def test_presence_confirmation_validation_does_not_reserve_rejected_id(harness):
+    start, wait = harness
+    worker, camera, api, request, headers = start("manual")
+    body = {"run_id": "r", "trial_id": "invalid-guard", "presence_confirm_seconds": 0.1}
+    assert request("POST", "trials", json=body, headers=headers).status_code == 422
+    assert "invalid-guard" not in worker.api_capture.trials
+    body.update(start_mode="presence", presence_confirm_seconds=0.01)
+    assert request("POST", "trials", json=body, headers=headers).status_code == 422
+    assert "invalid-guard" not in worker.api_capture.trials
+
+
+def test_guard_is_restored_when_waiting_trial_is_aborted(harness):
+    start, wait = harness
+    worker, camera, api, request, headers = start("presence")
+    original = worker.capture_config
+    response = request(
+        "POST",
+        "trials",
+        json={
+            "run_id": "r",
+            "trial_id": "cancel-guard",
+            "presence_confirm_seconds": 0.2,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 202
+    wait(lambda: worker.api_capture.trials["cancel-guard"]["status"] == "armed")
+    assert worker.capture_config.presence_confirm_seconds == 0.2
+    assert request("POST", "trials/cancel-guard/abort", headers=headers).status_code == 202
+    wait(lambda: not worker.api_capture.busy())
+    assert worker.capture_config == original
+
+
+def test_compact_trial_writes_directly_to_reserved_target(harness, tmp_path):
+    import json
+    from pathlib import Path
+
+    start, wait = harness
+    worker, camera, api, request, headers = start("hardware")
+    destination = tmp_path / "reserved"
+    destination.mkdir()
+    (destination / "capture-request.json").write_text(
+        json.dumps(
+            {
+                "format": "review_video_v1",
+                "run_id": "run",
+                "trial_id": "compact",
+            }
+        )
+    )
+    body = {
+        "run_id": "run",
+        "trial_id": "compact",
+        "start_mode": "presence",
+        "storage_profile": "review_video_v1",
+        "output_directory": str(destination),
+    }
+    assert request("GET", "capabilities").json()["direct_trial_output"]
+    assert (
+        request("POST", "trials", json=dict(body, trial_id="wrong"), headers=headers).status_code
+        == 422
+    )
+    assert request("POST", "trials", json=body, headers=headers).status_code == 202
+    wait(lambda: worker.api_capture.trials["compact"]["status"] == "armed")
+    for _ in range(4):
+        camera.send_frame(x=20)
+    wait(lambda: worker.snapshot()["status"].state in {"waiting", "moving"})
+    blank(camera)
+    time.sleep(0.06)
+    blank(camera)
+    wait(lambda: not worker.api_capture.busy(), timeout=5)
+    result = request("GET", "trials/compact").json()
+    assert result["status"] == "completed", result
+    assert result["manifest"]["schema_version"] == 2
+    assert result["manifest"]["media"]["state"] == "available"
+    assert Path(result["clip_path"]) == destination / "clip"
+    assert len(result["measurements"]) == result["manifest"]["frame_count"]
+    assert not list(destination.rglob("*.npy"))
+    assert not list((tmp_path / "hardware").rglob("*.mp4"))
+    assert worker.capture_config.start_mode == "hardware"
+    assert worker.capture.review_target is None if hasattr(worker, "capture") else True
+
+
 def test_session_expiry_aborts_active_capture_and_reports_buffer_loss(harness):
     start, wait = harness
     worker, camera, api, request, headers = start("hardware")

@@ -63,8 +63,10 @@ class PipelineWorker(QThread):
         # Separate from the frame mailbox: hardware-triggered cameras may not
         # deliver their first frame until long after connecting.
         return (
-            self.camera_idle.is_set() and not self.demo
-            and not self.stopping.is_set() and not self.api_capture.busy()
+            self.camera_idle.is_set()
+            and not self.demo
+            and not self.stopping.is_set()
+            and not self.api_capture.busy()
         )
 
     def apply_camera_settings(self, camera, capture, value):
@@ -72,12 +74,16 @@ class PipelineWorker(QThread):
         # slow GenTL operations (the GUI also reads that lock).
         with self.api_capture.lock:
             if (
-                self.demo or self.stopping.is_set() or self.api_capture.busy()
+                self.demo
+                or self.stopping.is_set()
+                or self.api_capture.busy()
                 or capture.status.state != "idle"
             ):
                 self.camera_settings_finished.emit(
-                    False, {}, "Kameraeinstellungen nur bei verbundener Kamera und "
-                    "beendeter Aufzeichnung ohne AutoTune-Versuch anwenden."
+                    False,
+                    {},
+                    "Kameraeinstellungen nur bei verbundener Kamera und "
+                    "beendeter Aufzeichnung ohne AutoTune-Versuch anwenden.",
                 )
                 return False
             self.camera_settings_updating = True
@@ -185,7 +191,8 @@ class PipelineWorker(QThread):
                         if self.api_capture.busy():
                             capture.metadata = {
                                 "processing": asdict(processor.config),
-                                "camera": dict(camera.diagnostics), "demo": self.demo,
+                                "camera": dict(camera.diagnostics),
+                                "demo": self.demo,
                                 **self.api_capture.metadata(),
                             }
                             if self.camera_config.mode == "acquisition_trigger" and not self.demo:
@@ -210,7 +217,8 @@ class PipelineWorker(QThread):
                                 )
                             capture.metadata = {
                                 "processing": asdict(processor.config),
-                                "camera": dict(camera.diagnostics), "demo": self.demo,
+                                "camera": dict(camera.diagnostics),
+                                "demo": self.demo,
                             }
                             capture.start_timed(float(value))
                             self.message.emit("Zeitaufnahme gestartet: Originalbilder und Winkel.")
@@ -226,8 +234,10 @@ class PipelineWorker(QThread):
                         self.message.emit("Messreferenz erst nach dem laufenden Durchlauf ändern.")
                         continue
                     if name == "config":
-                        if any(getattr(processor.config, key) != setting
-                               for key, setting in value.items()):
+                        if any(
+                            getattr(processor.config, key) != setting
+                            for key, setting in value.items()
+                        ):
                             self.measurement_epoch += 1
                         for key, setting in value.items():
                             setattr(processor.config, key, setting)
@@ -342,8 +352,10 @@ class PipelineWorker(QThread):
                     background_height, background_width = pending_background.shape[:2]
                     height, width = frame.image.shape[:2]
                     background = aligned_background(
-                        pending_background, background_geometry,
-                        crop["base"] if crop else geometry, geometry,
+                        pending_background,
+                        background_geometry,
+                        crop["base"] if crop else geometry,
+                        geometry,
                     )
                     if background is not None:
                         processor.set_background(background)
@@ -360,6 +372,7 @@ class PipelineWorker(QThread):
                 previous_id = frame.frame_id
                 detection = processor.process(frame.image)
                 capture.metadata = {
+                    "capture_fps": fps,
                     "processing": asdict(processor.config),
                     "camera": dict(camera.diagnostics),
                     "demo": self.demo,
